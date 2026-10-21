@@ -15,6 +15,9 @@ const addCommentBtn    = document.getElementById('add-comment-btn');
 const emojiGrid        = document.getElementById('emoji-grid');
 const blockImagesEl    = document.getElementById('block-images');
 const blockVideosEl    = document.getElementById('block-videos');
+const processedPostCount = document.getElementById('processed-post-count');
+const clearProcessedPostsBtn = document.getElementById('clear-processed-posts');
+const processedPostFeedback = document.getElementById('processed-post-feedback');
 const reloadDelayEl    = document.getElementById('reload-delay');
 const modeLimitRadio   = document.getElementById('mode-limit');
 const modeCustomRadio  = document.getElementById('mode-custom');
@@ -136,6 +139,37 @@ function parseReloadDelay(value, fallback) {
   const number = Number(value);
   return String(value).trim() !== '' && Number.isFinite(number) ? Math.max(0, number) : fallback;
 }
+
+function updateProcessedPostCount(history) {
+  const count = Array.isArray(history?.keys) ? new Set(history.keys).size : 0;
+  processedPostCount.textContent = `Đã lưu ${count} bài viết.`;
+}
+
+clearProcessedPostsBtn.addEventListener('click', async () => {
+  clearProcessedPostsBtn.disabled = true;
+  processedPostFeedback.textContent = 'Đang xóa dữ liệu…';
+  try {
+    const response = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'CLEAR_PROCESSED_POSTS' }, result => {
+        const error = chrome.runtime.lastError?.message || result?.error;
+        if (error || !result?.ok) reject(new Error(error || 'Không xóa được dữ liệu.'));
+        else resolve(result);
+      });
+    });
+    updateProcessedPostCount(response.history);
+    processedPostFeedback.textContent = 'Đã xóa dữ liệu bài viết đã lưu.';
+  } catch (err) {
+    processedPostFeedback.textContent = `Không xóa được dữ liệu: ${err.message}`;
+  } finally {
+    clearProcessedPostsBtn.disabled = false;
+  }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.processedPostHistory) {
+    updateProcessedPostCount(changes.processedPostHistory.newValue);
+  }
+});
 
 // ─── Log utilities ────────────────────────────────────────────────────────────
 
@@ -331,7 +365,7 @@ function savePeakConfig() {
 function init() {
   chrome.storage.local.get([
     'commentText', 'commentTemplates', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
-    'peakConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos'
+    'peakConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos', 'processedPostHistory'
   ], async (result) => {
     // Restore settings
     const templates = Array.isArray(result.commentTemplates) && result.commentTemplates.length
@@ -339,6 +373,7 @@ function init() {
     (templates.length ? templates : ['']).forEach(text => addCommentInput(text));
     blockImagesEl.checked = result.blockImages !== false;
     blockVideosEl.checked = result.blockVideos !== false;
+    updateProcessedPostCount(result.processedPostHistory);
     if (result.reloadDelaySec != null) reloadDelayEl.value = result.reloadDelaySec;
     if (result.postLimit != null)      postLimitEl.value   = result.postLimit;
     if (result.customPosts != null)    customPostsEl.value = result.customPosts;

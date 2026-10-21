@@ -30,8 +30,69 @@ let peakConfig = {
   reloadDelaySec: 15,
 };
 
-// Track post IDs (link) đã xử lý xong trong phiên này
+// Cache ID bài đã xử lý; dữ liệu gốc nằm trong chrome.storage.local.
 const processedPostLinks = new Set();
+let processedHistoryGeneration = 0;
+let processedHistoryCacheVersion = 0;
+let processedHistoryReady = null;
+
+function requestPostHistory(type, payload = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type, ...payload }, response => {
+      const error = chrome.runtime.lastError?.message || response?.error;
+      if (error || !response?.ok) reject(new Error(error || 'Không đọc/ghi được dữ liệu bài đã xử lý.'));
+      else resolve(response);
+    });
+  });
+}
+
+function applyProcessedPostHistory(history) {
+  if (!history || !Array.isArray(history.keys) || history.generation < processedHistoryGeneration) return;
+  if (history.generation !== processedHistoryGeneration) postCommentChoices.clear();
+  processedHistoryGeneration = history.generation;
+  processedHistoryCacheVersion++;
+  processedPostLinks.clear();
+  for (const key of history.keys) processedPostLinks.add(key);
+}
+
+function loadProcessedPostHistory() {
+  if (!processedHistoryReady) {
+    const version = processedHistoryCacheVersion;
+    processedHistoryReady = requestPostHistory('GET_PROCESSED_POSTS').then(response => {
+      // Không để kết quả đọc cũ ghi đè một sự kiện xóa/lưu mới hơn.
+      if (version === processedHistoryCacheVersion) applyProcessedPostHistory(response.history);
+    }).catch(err => {
+      processedHistoryReady = null;
+      throw err;
+    });
+  }
+  return processedHistoryReady;
+}
+
+async function rememberProcessedPost(key, generation) {
+  if (!key) return; // Không lưu chỉ số TimelineFeedUnit: vị trí có thể đổi sau reload.
+  const response = await requestPostHistory('MARK_POST_PROCESSED', { key, generation });
+  if (response.saved && response.generation === processedHistoryGeneration) processedPostLinks.add(key);
+}
+
+// Chỉ dùng ID từ permalink; bỏ tracking/comment_id và sự khác nhau giữa m./www.
+function getPostKey(link) {
+  try {
+    const url = new URL(link, 'https://www.facebook.com');
+    if (!/(^|\.)facebook\.com$/.test(url.hostname)) return null;
+    const postId = url.searchParams.get('story_fbid') ||
+      url.pathname.match(/\/(?:posts|permalink)\/([A-Za-z0-9]+)(?:\/|$)/)?.[1];
+    if (postId && /^[A-Za-z0-9]+$/.test(postId)) return `post:${postId}`;
+    const videoId = url.pathname.match(/\/(?:videos|reel)\/(?:[^/]+\/)?(\d+)(?:\/|$)/)?.[1] ||
+      (/^\/watch\/?$/.test(url.pathname) ? url.searchParams.get('v') : null);
+    if (videoId && /^\d+$/.test(videoId)) return `video:${videoId}`;
+    const photoId = url.pathname.includes('/photos/')
+      ? url.pathname.match(/\/(\d+)\/?$/)?.[1]
+      : /^\/photo(?:\.php)?\/?$/.test(url.pathname) ? url.searchParams.get('fbid') : null;
+    if (photoId && /^\d+$/.test(photoId)) return `photo:${photoId}`;
+  } catch (_) {}
+  return null;
+}
 
 function getCommentForPost(postLink) {
   if (!postCommentChoices.has(postLink)) {
@@ -203,23 +264,33 @@ async function waitForElement(root, selector, timeout = 5000, interval = 200) {
 
 function getPostLink(postEl) {
   const anchors = postEl.querySelectorAll('a[href]');
+  let mediaLink = null;
   for (const a of anchors) {
     const href = a.getAttribute('href') || '';
-    if (
-      href.includes('/posts/') ||
+    const isPostLink = href.includes('/posts/') ||
       href.includes('/permalink/') ||
-      href.includes('/videos/') ||
+      href.includes('story_fbid=');
+    const isMediaLink = href.includes('/videos/') ||
       href.includes('/photos/') ||
-      href.includes('story_fbid=')
-    ) {
+      href.includes('/photo.php?') ||
+      href.includes('/photo?') ||
+      href.includes('/photo/?') ||
+      href.includes('/reel/') ||
+      href.includes('/watch/?') ||
+      href.includes('/watch?');
+    if (isPostLink || (isMediaLink && !mediaLink)) {
+      let absoluteLink;
       try {
-        return new URL(href, 'https://www.facebook.com').href;
+        absoluteLink = new URL(href, 'https://www.facebook.com').href;
       } catch {
-        return href;
+        absoluteLink = href;
       }
+      // Permalink của bài ổn định hơn link ảnh/video nằm bên trong bài.
+      if (isPostLink) return absoluteLink;
+      mediaLink = absoluteLink;
     }
   }
-  return postEl.getAttribute('data-pagelet') || 'unknown';
+  return mediaLink || postEl.getAttribute('data-pagelet') || 'unknown';
 }
 
 // ─── Action: Insert text into Lexical editor ──────────────────────────────────
@@ -651,6 +722,11 @@ async function performCommentOnTextbox(container, textbox, text) {
 async function processPost(postEl, index) {
   const postStart = Date.now();
   const postLink  = getPostLink(postEl);
+  let postKey = getPostKey(postLink);
+  const historyGeneration = processedHistoryGeneration;
+  let completed = false;
+
+  if (postKey && processedPostLinks.has(postKey)) return true;
 
   // Cuộn bài viết vào giữa màn hình để Facebook mount DOM và hiển thị đầy đủ
   try {
@@ -672,7 +748,7 @@ async function processPost(postEl, index) {
     likeAction    = 'skip like';
     commentAction = 'skip comment (bài đã được like)';
     commentStatus = 'N/A';
-    processedPostLinks.add(postLink);
+    completed = true;
   } else {
     // ── B2-2: Xử lý bài chưa được like ────────────────────────────────────
     // Chọn một lần cho mỗi bài; mọi lần retry dùng lại đúng nội dung đã chọn.
@@ -697,7 +773,7 @@ async function processPost(postEl, index) {
       commentAction = `Tổng thời gian: ${commentResult.elapsed}ms${commentResult.success ? '' : ' (thất bại)'}`;
 
       if (commentResult.success) {
-        processedPostLinks.add(postLink);
+        completed = true;
       }
     } else {
       // Trường hợp 2: Không có ô bình luận inline → Phải mở popup
@@ -877,7 +953,7 @@ async function processPost(postEl, index) {
           : `thất bại sau ${MAX_RETRIES} lần thử lại trong popup`;
 
         if (commentSuccess) {
-          processedPostLinks.add(postLink);
+          completed = true;
         }
 
         // 3. Đóng popup dialog sau khi hoàn tất
@@ -886,6 +962,19 @@ async function processPost(postEl, index) {
           await closeDialog(openedDialog);
         }
       }
+    }
+  }
+
+  if (completed) {
+    // Facebook có thể chỉ gắn permalink sau khi bài được cuộn vào vùng nhìn thấy.
+    if (!postKey) postKey = getPostKey(getPostLink(postEl));
+    if (!postKey) logEntry(`⚠ Bài ${index + 1} chưa có ID/link ổn định nên chưa lưu vào lịch sử.`);
+    try {
+      await rememberProcessedPost(postKey, historyGeneration);
+    } catch (err) {
+      logEntry(`❌ Không lưu được bài đã xử lý: ${err.message}. Đã dừng để tránh xử lý lặp.`);
+      stopAutomation();
+      await chrome.storage.local.set({ isRunning: false });
     }
   }
 
@@ -904,6 +993,7 @@ async function processPost(postEl, index) {
 
   console.log(log);
   logEntry(log);
+  return completed;
 }
 
 // ─── Core: Tìm bài viết theo index trong Timeline ────────────────────────────
@@ -930,7 +1020,7 @@ function getOrderedTimelinePosts(timeline) {
  * @param {number}  index
  * @returns {Promise<Element|null>}
  */
-async function findPostElement(timeline, index) {
+async function findPostElement(timeline, index, scrollToPost = true) {
   let posts = getOrderedTimelinePosts(timeline);
 
   // Nếu số lượng bài chưa đủ đến index, cuộn nhẹ trang xuống để kích hoạt Facebook load thêm feed
@@ -944,19 +1034,26 @@ async function findPostElement(timeline, index) {
 
   const postEl = posts[index] || null;
 
-  if (postEl) {
+  if (postEl && scrollToPost) {
     // Cuộn bài viết vào giữa màn hình để Facebook mount nội dung DOM
     postEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await sleep(400);
-    return postEl;
   }
 
-  return null;
+  return postEl;
 }
 
 // ─── Core: One full scan cycle ────────────────────────────────────────────────
 
 async function runCycle() {
+  if (!automationRunning) return;
+
+  try {
+    await loadProcessedPostHistory();
+  } catch (err) {
+    logEntry(`❌ Chưa đọc được dữ liệu bài đã xử lý: ${err.message}. Sẽ thử lại.`);
+    return;
+  }
   if (!automationRunning) return;
 
   const timeline = document.querySelector('div[data-pagelet="ProfileTimeline"]');
@@ -970,7 +1067,7 @@ async function runCycle() {
   for (const index of targetIndices) {
     if (!automationRunning) return;
 
-    const postEl = await findPostElement(timeline, index);
+    const postEl = await findPostElement(timeline, index, false);
     if (!postEl) {
       logEntry(`⚠ Không tìm thấy bài viết ở vị trí thứ ${index + 1} trong ProfileTimeline`);
       allDone = false;
@@ -978,9 +1075,14 @@ async function runCycle() {
     }
 
     const link = getPostLink(postEl);
-    await processPost(postEl, index);
-    // Đánh giá sau khi xử lý để bài vừa hoàn tất được tính ngay trong lượt này.
-    if (!processedPostLinks.has(link)) {
+    const key = getPostKey(link);
+    if (key && processedPostLinks.has(key)) {
+      logEntry(`⏭ Bài ${index + 1} đã được lưu là đã xử lý; bỏ qua: ${link}`);
+      continue;
+    }
+
+    const completed = await processPost(postEl, index);
+    if (!completed) {
       allDone = false;
     }
 
@@ -1101,6 +1203,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // Dừng bảo vệ ngay cả khi popup đã cập nhật storage nhưng relay bị gián đoạn.
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.processedPostHistory) {
+    applyProcessedPostHistory(changes.processedPostHistory.newValue);
+  }
   if (area === 'local' && changes.isRunning?.newValue === false && automationRunning) {
     stopAutomation();
   }

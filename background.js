@@ -95,6 +95,53 @@ function getStoredState() {
   });
 }
 
+// Mọi thao tác lịch sử đi qua một hàng đợi để lưu/xóa không ghi đè lẫn nhau.
+let processedPostHistoryQueue = Promise.resolve();
+function withProcessedPostHistory(action) {
+  const result = processedPostHistoryQueue.then(async () => {
+    const stored = await chrome.storage.local.get(['processedPostHistory']);
+    const value = stored.processedPostHistory;
+    const history = {
+      generation: Number.isSafeInteger(value?.generation) && value.generation >= 0 ? value.generation : 0,
+      keys: Array.isArray(value?.keys)
+        ? [...new Set(value.keys.filter(key => /^(post|photo|video):[A-Za-z0-9]+$/.test(key)))] : [],
+    };
+    return action(history);
+  });
+  processedPostHistoryQueue = result.catch(() => {});
+  return result;
+}
+
+function readProcessedPostHistory() {
+  return withProcessedPostHistory(history => history);
+}
+
+function markPostProcessed(key, generation, tabId) {
+  return withProcessedPostHistory(async history => {
+    const state = await getStoredState();
+    if (!state.isRunning || tabId !== state.automationTabId || generation !== history.generation) {
+      return { saved: false, generation: history.generation };
+    }
+    if (typeof key !== 'string' || !/^(post|photo|video):[A-Za-z0-9]+$/.test(key)) {
+      throw new Error('Không có ID bài viết hợp lệ để lưu.');
+    }
+    if (!history.keys.includes(key)) {
+      history.keys.push(key);
+      await chrome.storage.local.set({ processedPostHistory: history });
+    }
+    return { saved: true, generation: history.generation };
+  });
+}
+
+function clearProcessedPostHistory() {
+  return withProcessedPostHistory(async history => {
+    // Đổi thế hệ để một tác vụ cũ còn đang chạy không ghi lại dữ liệu vừa xóa.
+    const cleared = { generation: history.generation + 1, keys: [] };
+    await chrome.storage.local.set({ processedPostHistory: cleared });
+    return cleared;
+  });
+}
+
 // ─── Background Execution Guard ──────────────────────────────────────────────
 
 const BACKGROUND_GUARD_ALARM = 'automation-background-guard';
@@ -210,6 +257,17 @@ async function sendToTab(tabId, payload) {
 // ─── Runtime Messaging ────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  if (message.type === 'GET_PROCESSED_POSTS' || message.type === 'CLEAR_PROCESSED_POSTS' || message.type === 'MARK_POST_PROCESSED') {
+    const operation = message.type === 'GET_PROCESSED_POSTS'
+      ? readProcessedPostHistory().then(history => ({ history }))
+      : message.type === 'CLEAR_PROCESSED_POSTS'
+        ? clearProcessedPostHistory().then(history => ({ history }))
+        : markPostProcessed(message.key, message.generation, sender.tab?.id);
+    operation.then(result => sendResponse({ ok: true, ...result }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
 
   // 1. Content script hỏi xem tab hiện tại có phải tab được phân công chạy không
   if (message.type === 'CHECK_SHOULD_RUN') {

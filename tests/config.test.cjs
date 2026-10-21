@@ -67,15 +67,23 @@ function background(initial = {}) {
   return { ctx, chrome, state, sessionRules, tabs, intervals, alarms, sync };
 }
 
-function content() {
+function content(historyServer = null) {
   const math = Object.create(Math);
   math.random = () => 0;
   const chrome = {
-    storage: { onChanged: event(), local: { set() {}, get(keys, cb) { cb({ originalUrl: 'https://www.facebook.com/test' }); } } },
-    runtime: { onMessage: event(), sendMessage(message, cb) { if (cb) cb({ shouldRun: false }); } },
+    storage: { onChanged: historyServer?.chrome.storage.onChanged || event(), local: {
+      set(values) { return historyServer ? historyServer.chrome.storage.local.set(values) : Promise.resolve(); },
+      get(keys, cb) { cb({ originalUrl: 'https://www.facebook.com/test' }); },
+    } },
+    runtime: { onMessage: event(), sendMessage(message, cb) {
+      if (/^(GET_PROCESSED_POSTS|MARK_POST_PROCESSED|CLEAR_PROCESSED_POSTS)$/.test(message.type)) {
+        if (historyServer) historyServer.chrome.runtime.onMessage.listeners[0](message, { tab: { id: 7 } }, cb);
+        else cb({ ok: true, history: { generation: 0, keys: [] } });
+      } else if (cb) cb({ shouldRun: false });
+    } },
   };
   const ctx = vm.createContext({
-    chrome, console, Math: math, Date, AbortController, navigator: {},
+    chrome, console, Math: math, Date, URL, AbortController, navigator: {},
     window: { location: { href: 'https://www.facebook.com/test' } },
     document: {}, setTimeout, clearTimeout,
   });
@@ -135,7 +143,7 @@ test('countdown respects a fractional delay and allows zero without adding a sec
       automationRunning = true; targetIndices = [0]; reloadDelaySec = testDelay;
       peakConfig.enabled = false; processedPostLinks.add('post');
       document.querySelector = () => ({}); findPostElement = async () => ({});
-      getPostLink = () => 'post'; processPost = async () => {};
+      getPostLink = () => 'post'; processPost = async () => true;
       var delays = []; sleep = async ms => { delays.push(ms); };
     `, ctx);
     await ctx.runCycle();
@@ -157,7 +165,9 @@ function scanCycleContext(scenario = {}) {
     getPostLink = post => 'post-' + post.index;
     processPost = async (post, index) => {
       checkedPosts.push(index);
-      if (scenario.failed !== index) processedPostLinks.add(getPostLink(post));
+      if (scenario.failed === index) return false;
+      processedPostLinks.add(getPostLink(post));
+      return true;
     };
     sleep = async ms => {
       cycleWaits.push(ms);
@@ -170,6 +180,64 @@ function scanCycleContext(scenario = {}) {
   `, ctx);
   return ctx;
 }
+
+function timelineFinderContext(historyServer = null) {
+  const ctx = content(historyServer);
+  vm.runInContext(`
+    automationRunning = true; targetIndices = [0, 1]; reloadDelaySec = 2;
+    peakConfig.enabled = false;
+    var finderScrolls = [], finderWaits = [], checkedTimelinePosts = [], finderReloads = 0;
+    var timelinePosts = [0, 1].map(index => ({
+      index,
+      scrollIntoView() { finderScrolls.push(index); }
+    }));
+    var fakeTimeline = { querySelectorAll: () => timelinePosts };
+    document.querySelector = () => fakeTimeline;
+    window.scrollBy = () => { finderScrolls.push('window'); };
+    sleep = async ms => { finderWaits.push(ms); };
+    getPostLink = post => 'https://www.facebook.com/page/posts/' + (100 + post.index) + '/';
+    processPost = async (post, index) => { checkedTimelinePosts.push(index); return true; };
+    chrome.storage.local.get = (keys, callback) => { finderReloads++; callback({}); };
+  `, ctx);
+  return ctx;
+}
+
+test('actual finder returns the second visible post when scrolling is disabled', async () => {
+  const ctx = timelineFinderContext();
+  const found = await ctx.findPostElement(ctx.fakeTimeline, 1, false);
+  assert.equal(found, ctx.timelinePosts[1]);
+  assert.equal(ctx.finderScrolls.length, 0);
+  assert.equal(ctx.finderWaits.length, 0);
+});
+
+test('actual finder still scrolls on request and returns null for a missing post', async () => {
+  const ctx = timelineFinderContext();
+  assert.equal(await ctx.findPostElement(ctx.fakeTimeline, 1, true), ctx.timelinePosts[1]);
+  assert.deepEqual([...ctx.finderScrolls], [1]);
+  assert.deepEqual([...ctx.finderWaits], [400]);
+  assert.equal(await ctx.findPostElement(ctx.fakeTimeline, 2, false), null);
+  assert.deepEqual([...ctx.finderScrolls], [1, 'window', 'window', 'window']);
+});
+
+test('scan uses the actual finder to process both visible posts and start countdown', async () => {
+  const ctx = timelineFinderContext();
+  await ctx.runCycle();
+  assert.deepEqual([...ctx.checkedTimelinePosts], [0, 1]);
+  assert.equal(ctx.finderReloads, 1);
+  assert.equal(ctx.finderScrolls.length, 0);
+  assert.deepEqual([...ctx.finderWaits], [400, 400, 1000, 1000]);
+});
+
+test('actual finder permits skipping stored visible posts without processing or scrolling', async () => {
+  const server = background({ isRunning: true, automationTabId: 7,
+    processedPostHistory: { generation: 0, keys: ['post:100', 'post:101'] } });
+  const ctx = timelineFinderContext(server);
+  await ctx.runCycle();
+  assert.equal(ctx.checkedTimelinePosts.length, 0);
+  assert.equal(ctx.finderScrolls.length, 0);
+  assert.equal(ctx.finderReloads, 1);
+  assert.deepEqual([...ctx.finderWaits], [1000, 1000]);
+});
 
 test('first scan of two newly completed posts starts reload countdown immediately', async () => {
   const ctx = scanCycleContext();
@@ -244,4 +312,187 @@ test('updating extension preserves settings and migrates a legacy multiline comm
   assert.equal(b.state.reloadDelaySec, 0);
   assert.equal(b.state.blockImages, false);
   assert.equal(b.state.blockVideos, true);
+});
+
+function handledPostContext(server, { link = 'https://www.facebook.com/page/posts/123/', success = true, liked = false } = {}) {
+  const ctx = content(server);
+  ctx.testPostLink = link;
+  ctx.testCommentSuccess = success;
+  ctx.testAlreadyLiked = liked;
+  ctx.console = { ...console, log() {} };
+  vm.runInContext(`
+    automationRunning = true; targetIndices = [0]; reloadDelaySec = 0;
+    commentTemplates = ['Nội dung thử ❤️']; peakConfig.enabled = false;
+    var likeCalls = 0, commentCalls = 0, scrollCalls = 0, reloadRequests = 0;
+    var fakePost = {
+      scrollIntoView() { scrollCalls++; },
+      querySelector() { return testAlreadyLiked ? {} : null; }
+    };
+    document.querySelector = () => ({});
+    findPostElement = async (timeline, index, shouldScroll) => {
+      if (shouldScroll !== false) throw new Error('Cached lookup should not scroll');
+      return fakePost;
+    };
+    getPostLink = () => testPostLink;
+    findInlineCommentBox = () => ({});
+    performLike = async () => { likeCalls++; return 0; };
+    performCommentOnTextbox = async () => {
+      commentCalls++;
+      return { success: testCommentSuccess, elapsed: 1 };
+    };
+    sleep = async () => {};
+    chrome.storage.local.get = (keys, callback) => { reloadRequests++; callback({}); };
+  `, ctx);
+  return ctx;
+}
+
+test('post keys normalize permalink variants and never use a feed position as identity', () => {
+  const ctx = content();
+  for (const link of [
+    'https://www.facebook.com/page/posts/123/?comment_id=9&__cft__=tracking#anchor',
+    'https://m.facebook.com/permalink.php?story_fbid=123&id=777',
+    '/page/permalink/123/',
+  ]) assert.equal(ctx.getPostKey(link), 'post:123');
+  assert.equal(ctx.getPostKey('https://www.facebook.com/page/posts/pfbidABC123/'), 'post:pfbidABC123');
+  assert.equal(ctx.getPostKey('https://www.facebook.com/page/videos/555/'), 'video:555');
+  assert.equal(ctx.getPostKey('https://www.facebook.com/watch/?v=555'), 'video:555');
+  assert.equal(ctx.getPostKey('https://www.facebook.com/photo.php?fbid=456&set=test'), 'photo:456');
+  assert.equal(ctx.getPostKey('https://www.facebook.com/page/photos/a.123/456/?tracking=x'), 'photo:456');
+  for (const link of ['TimelineFeedUnit_0', 'unknown', '/page/photos/a.123/', 'https://example.com/page/posts/123/']) {
+    assert.equal(ctx.getPostKey(link), null);
+  }
+});
+
+test('a post permalink takes precedence over embedded media links regardless of order', () => {
+  const ctx = content();
+  const photo = '/page/photos/a.111/456/';
+  const permalink = '/page/posts/123/?comment_id=9';
+  const post = links => ({
+    querySelectorAll: () => links.map(href => ({ getAttribute: () => href })),
+    getAttribute: () => 'TimelineFeedUnit_0',
+  });
+  assert.equal(ctx.getPostKey(ctx.getPostLink(post([photo, permalink]))), 'post:123');
+  assert.equal(ctx.getPostKey(ctx.getPostLink(post([permalink, photo]))), 'post:123');
+  assert.equal(ctx.getPostKey(ctx.getPostLink(post([photo]))), 'photo:456');
+  assert.equal(ctx.getPostKey(ctx.getPostLink(post([]))), null);
+});
+
+test('successful processing persists and a new page/worker skips without clicking or scrolling', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  const first = handledPostContext(server);
+  await first.runCycle();
+  assert.deepEqual([...server.state.processedPostHistory.keys], ['post:123']);
+  assert.equal(vm.runInContext('commentCalls', first), 1);
+  assert.equal(vm.runInContext('reloadRequests', first), 1);
+
+  const restarted = background(server.state);
+  const next = handledPostContext(restarted, { link: 'https://m.facebook.com/page/posts/123/?comment_id=99' });
+  await next.runCycle();
+  assert.equal(vm.runInContext('likeCalls', next), 0);
+  assert.equal(vm.runInContext('commentCalls', next), 0);
+  assert.equal(vm.runInContext('scrollCalls', next), 0);
+  assert.equal(vm.runInContext('reloadRequests', next), 1);
+});
+
+test('failed comments are not saved or treated as finished', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  const ctx = handledPostContext(server, { success: false });
+  await ctx.runCycle();
+  assert.equal(server.state.processedPostHistory, undefined);
+  assert.equal(vm.runInContext('reloadRequests', ctx), 0);
+});
+
+test('already-liked posts keep the existing skip behavior and are remembered', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  const ctx = handledPostContext(server, { liked: true });
+  await ctx.runCycle();
+  assert.deepEqual([...server.state.processedPostHistory.keys], ['post:123']);
+  assert.equal(vm.runInContext('commentCalls', ctx), 0);
+});
+
+test('unidentified posts can finish the cycle but never persist a positional fallback', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  const ctx = handledPostContext(server, { link: 'TimelineFeedUnit_0' });
+  await ctx.runCycle();
+  await ctx.runCycle();
+  assert.equal(server.state.processedPostHistory, undefined);
+  assert.equal(vm.runInContext('commentCalls', ctx), 2);
+  assert.equal(vm.runInContext('reloadRequests', ctx), 2);
+});
+
+test('concurrent history writes do not lose IDs and invalid/non-target records are rejected', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  await Promise.all([
+    server.ctx.markPostProcessed('post:111', 0, 7),
+    server.ctx.markPostProcessed('post:222', 0, 7),
+    server.ctx.markPostProcessed('post:111', 0, 7),
+  ]);
+  assert.deepEqual([...server.state.processedPostHistory.keys], ['post:111', 'post:222']);
+  assert.equal((await server.ctx.markPostProcessed('post:333', 0, 8)).saved, false);
+  await assert.rejects(server.ctx.markPostProcessed('TimelineFeedUnit_0', 0, 7));
+});
+
+test('clear empties active caches and permits subsequent processing without changing settings/logs', async () => {
+  const server = background({ isRunning: true, automationTabId: 7,
+    commentTemplates: ['Giữ nội dung ❤️'], reloadDelaySec: 0, logs: [{ text: 'Giữ log' }] });
+  const ctx = handledPostContext(server);
+  await ctx.runCycle();
+  await ctx.runCycle();
+  assert.equal(vm.runInContext('commentCalls', ctx), 1);
+  await server.ctx.clearProcessedPostHistory();
+  assert.equal(vm.runInContext('processedPostLinks.size', ctx), 0);
+  assert.equal(server.state.processedPostHistory.generation, 1);
+  assert.equal(server.state.processedPostHistory.keys.length, 0);
+  assert.deepEqual(server.state.commentTemplates, ['Giữ nội dung ❤️']);
+  assert.equal(server.state.logs[0].text, 'Giữ log');
+  await ctx.runCycle();
+  assert.equal(vm.runInContext('commentCalls', ctx), 2);
+  assert.deepEqual([...server.state.processedPostHistory.keys], ['post:123']);
+});
+
+test('clear wins over a stale completion or delayed history load', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  await server.ctx.markPostProcessed('post:111', 0, 7);
+  const ctx = content(server);
+  const originalSend = ctx.chrome.runtime.sendMessage;
+  let delayed;
+  ctx.chrome.runtime.sendMessage = (message, callback) => {
+    if (message.type === 'GET_PROCESSED_POSTS') delayed = callback;
+    else originalSend(message, callback);
+  };
+  const load = ctx.loadProcessedPostHistory();
+  await server.ctx.clearProcessedPostHistory();
+  delayed({ ok: true, history: { generation: 0, keys: ['post:111'] } });
+  await load;
+  assert.equal(vm.runInContext('processedPostLinks.size', ctx), 0);
+  assert.equal((await server.ctx.markPostProcessed('post:222', 0, 7)).saved, false);
+  assert.equal(server.state.processedPostHistory.keys.length, 0);
+});
+
+test('failure to read history prevents interactions; failure to save stops automation', async () => {
+  const server = background({ isRunning: true, automationTabId: 7 });
+  const unreadable = handledPostContext(server);
+  unreadable.chrome.runtime.sendMessage = (message, callback) => {
+    if (message.type === 'GET_PROCESSED_POSTS') callback({ error: 'Read failed' });
+  };
+  await unreadable.runCycle();
+  assert.equal(vm.runInContext('commentCalls', unreadable), 0);
+
+  const unwritable = handledPostContext(server);
+  const originalSend = unwritable.chrome.runtime.sendMessage;
+  unwritable.chrome.runtime.sendMessage = (message, callback) => {
+    if (message.type === 'MARK_POST_PROCESSED') callback({ error: 'Quota exceeded' });
+    else originalSend(message, callback);
+  };
+  await unwritable.runCycle();
+  assert.equal(vm.runInContext('automationRunning', unwritable), false);
+  assert.equal(vm.runInContext('reloadRequests', unwritable), 0);
+  assert.equal(server.state.isRunning, false);
+});
+
+test('extension update preserves stored post history', async () => {
+  const server = background({ processedPostHistory: { generation: 3, keys: ['post:111'] } });
+  await server.chrome.runtime.onInstalled.listeners[0]();
+  assert.equal(server.state.processedPostHistory.generation, 3);
+  assert.deepEqual(server.state.processedPostHistory.keys, ['post:111']);
 });

@@ -21,6 +21,7 @@
 
 ## ✨ Tính Năng Nổi Bật
 
+- **Nhớ bài đã xử lý:** Lưu ID bài viết trong `chrome.storage.local` của hồ sơ Chrome hiện tại. Khi reload hoặc chạy lại, bài có trong lịch sử được bỏ qua trước thao tác cuộn/like/bình luận. Cấu hình hiển thị số bài đã lưu và nút **Xóa dữ liệu bài đã xử lý**; nút này cũng làm mới bộ nhớ đệm của tab đang chạy, không xóa các cấu hình hoặc nhật ký khác. Bài không có ID/link ổn định không được lưu theo vị trí để tránh bỏ qua nhầm bài mới.
 - **Nhiều mẫu bình luận:** Bấm **Thêm nội dung** để tạo danh sách; mỗi ô là một mẫu riêng. Extension chọn ngẫu nhiên một mẫu cho mỗi bài và giữ nguyên mẫu đó khi retry. Ô trống được bỏ qua; cấu hình một bình luận cũ vẫn được giữ lại.
 - **Chèn emoji:** Chọn ô bình luận rồi mở **Chèn emoji vào ô đang chọn**. Emoji được chèn tại con trỏ hoặc thay đoạn đang chọn; cũng có thể nhập/dán emoji trực tiếp từ bàn phím.
 - **Thời gian reload từ 0 giây:** Cả lịch thường và lịch cao điểm nhận số không âm, gồm `0`, `0.5`, `1`… Giá trị `0` bỏ thời gian chờ reload, các thao tác xử lý bài vẫn có thời gian thực thi riêng.
@@ -162,6 +163,8 @@ Hàm `getReloadScheduleInfo()` trong [content.js](file:///Users/quangvlh/work/ex
 Extension lưu trữ trạng thái người dùng trong `chrome.storage.local`:
 
 Các cấu hình mới: `commentTemplates` (mảng chuỗi), `blockImages` và `blockVideos` (boolean). `commentText` được giữ để tương thích cấu hình cũ. Danh sách mẫu và lịch reload được đọc khi bắt đầu hoặc tải lại trang; tùy chọn chặn tải được cập nhật ngay trong lúc chạy.
+
+`processedPostHistory` lưu `{ generation, keys }`: danh sách ID của bài đã hoàn tất hoặc đã được bỏ qua theo quy tắc "đã like" hiện tại. Link có tracking/comment ID khác nhau được nhận diện là cùng bài. Xóa lịch sử chỉ xóa dữ liệu ghi nhớ trong extension; trạng thái like và bình luận trên Facebook vẫn giữ nguyên. Lịch sử được giữ khi cập nhật extension.
 
 | Khóa (Key) | Kiểu dữ liệu | Mô tả |
 | :--- | :--- | :--- |
