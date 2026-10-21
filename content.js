@@ -16,6 +16,8 @@
 let automationRunning = false;
 let isLoopRunning     = false;
 let commentText       = '';
+let commentTemplates  = [];
+const postCommentChoices = new Map();
 let reloadDelaySec    = 30;
 let originalUrl       = '';
 let targetIndices     = [0, 1]; // Danh sách các bài cần quét (mặc định: 0, 1)
@@ -30,6 +32,56 @@ let peakConfig = {
 
 // Track post IDs (link) đã xử lý xong trong phiên này
 const processedPostLinks = new Set();
+
+function getCommentForPost(postLink) {
+  if (!postCommentChoices.has(postLink)) {
+    const choices = commentTemplates.length ? commentTemplates : [commentText];
+    postCommentChoices.set(postLink, choices[Math.floor(Math.random() * choices.length)]);
+  }
+  return postCommentChoices.get(postLink);
+}
+
+function parseReloadDelay(value, fallback) {
+  const number = Number(value);
+  return value != null && String(value).trim() !== '' && Number.isFinite(number)
+    ? Math.max(0, number) : fallback;
+}
+
+// Giữ Web Lock chỉ trong ca automation. Chrome dùng trạng thái này để tránh
+// đóng băng tab khi chạy nền (khác với autoDiscardable của Memory Saver).
+let automationLockController = null;
+
+function acquireAutomationLock() {
+  if (automationLockController) return;
+  if (!navigator.locks) {
+    logEntry('⚠ Trình duyệt không hỗ trợ Web Locks; tab vẫn có thể bị đóng băng.');
+    return;
+  }
+
+  const controller = new AbortController();
+  automationLockController = controller;
+  navigator.locks.request('fb-fanpage-auto-running', {
+    mode: 'shared',
+    signal: controller.signal,
+  }, async () => {
+    if (controller.signal.aborted || !automationRunning) return;
+    await new Promise((resolve) => {
+      controller.signal.addEventListener('abort', resolve, { once: true });
+    });
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      logEntry(`⚠ Không thể giữ Web Lock cho tab chạy nền: ${err.message}`);
+    }
+  }).finally(() => {
+    if (automationLockController === controller) automationLockController = null;
+  });
+}
+
+function releaseAutomationLock() {
+  const controller = automationLockController;
+  automationLockController = null;
+  if (controller) controller.abort();
+}
 
 // ─── Utility: Tính toán thời gian reload theo khung giờ cao điểm ───────────────
 
@@ -54,7 +106,7 @@ function getReloadScheduleInfo() {
     .filter(h => !isNaN(h) && h >= 0 && h <= 23);
 
   const durationMin = Math.max(1, parseInt(peakConfig.durationMin, 10) || 15);
-  const peakDelay   = Math.max(3, parseInt(peakConfig.reloadDelaySec, 10) || 15);
+  const peakDelay   = parseReloadDelay(peakConfig.reloadDelaySec, 15);
 
   for (const h of hours) {
     const startMins = h * 60;
@@ -101,7 +153,10 @@ function sleep(ms) {
       }
     }, ms + 2500);
 
-    chrome.runtime.sendMessage({ type: 'BACKGROUND_SLEEP', ms }, () => {
+    chrome.runtime.sendMessage({ type: 'BACKGROUND_SLEEP', ms }, (response) => {
+      // Khi worker khởi động lại làm mất response, dùng timer dự phòng;
+      // không coi lỗi kênh nhắn tin là đã chờ xong.
+      if (chrome.runtime.lastError || !response?.ok) return;
       if (!resolved) {
         resolved = true;
         clearTimeout(fallback);
@@ -620,6 +675,8 @@ async function processPost(postEl, index) {
     processedPostLinks.add(postLink);
   } else {
     // ── B2-2: Xử lý bài chưa được like ────────────────────────────────────
+    // Chọn một lần cho mỗi bài; mọi lần retry dùng lại đúng nội dung đã chọn.
+    const selectedComment = getCommentForPost(postLink);
 
     // Kiểm tra bài viết có sẵn ô bình luận inline hay không
     const inlineBox = findInlineCommentBox(postEl);
@@ -630,7 +687,7 @@ async function processPost(postEl, index) {
       commentStatus = 'inline';
       const [likeElapsed, commentResult] = await Promise.all([
         performLike(postEl),
-        performCommentOnTextbox(postEl, inlineBox, commentText)
+        performCommentOnTextbox(postEl, inlineBox, selectedComment)
       ]);
 
       likeAction = (likeElapsed === -1)
@@ -788,7 +845,7 @@ async function processPost(postEl, index) {
               targetTextbox.scrollIntoView({ behavior: 'instant', block: 'center' });
               await sleep(150);
 
-              const inserted = await insertTextIntoLexical(targetTextbox, commentText);
+              const inserted = await insertTextIntoLexical(targetTextbox, selectedComment);
               if (inserted) {
                 await sleep(300);
                 const submitted = await submitComment(openedDialog, 5000);
@@ -921,11 +978,12 @@ async function runCycle() {
     }
 
     const link = getPostLink(postEl);
+    await processPost(postEl, index);
+    // Đánh giá sau khi xử lý để bài vừa hoàn tất được tính ngay trong lượt này.
     if (!processedPostLinks.has(link)) {
       allDone = false;
     }
 
-    await processPost(postEl, index);
     await sleep(randInt(400, 800));
   }
 
@@ -940,9 +998,11 @@ async function runCycle() {
       logEntry(`ℹ Tất cả bài chỉ định đã xong. Reload sau ${effectiveDelay} giây…`);
     }
 
-    for (let s = effectiveDelay; s > 0 && automationRunning; s--) {
-      logEntry(`⏳ Reload sau ${s}s…`);
-      await sleep(1000);
+    for (let remainingMs = Math.round(effectiveDelay * 1000); remainingMs > 0 && automationRunning;) {
+      logEntry(`⏳ Reload sau ${remainingMs / 1000}s…`);
+      const stepMs = Math.min(1000, remainingMs);
+      await sleep(stepMs);
+      remainingMs -= stepMs;
     }
     if (automationRunning) {
       logEntry(`🔄 Đang reload về đúng URL trang ban đầu: ${originalUrl}`);
@@ -975,8 +1035,14 @@ async function startLoop() {
 function startAutomation(config) {
   if (automationRunning) return;
   automationRunning  = true;
+  acquireAutomationLock();
   commentText        = config.commentText || '';
-  reloadDelaySec     = typeof config.reloadDelaySec === 'number' ? config.reloadDelaySec : 30;
+  commentTemplates   = Array.isArray(config.commentTemplates)
+    ? config.commentTemplates.filter(text => typeof text === 'string').map(text => text.trim()).filter(Boolean)
+    : [];
+  if (!commentTemplates.length && commentText.trim()) commentTemplates = [commentText.trim()];
+  postCommentChoices.clear();
+  reloadDelaySec     = parseReloadDelay(config.reloadDelaySec, 30);
   originalUrl        = config.originalUrl || window.location.href;
   targetIndices      = Array.isArray(config.targetIndices) && config.targetIndices.length > 0
     ? config.targetIndices
@@ -1001,6 +1067,7 @@ function startAutomation(config) {
 
 function stopAutomation() {
   automationRunning = false;
+  releaseAutomationLock();
   logEntry('⏹ Đã dừng tự động hóa.');
 }
 
@@ -1010,7 +1077,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'START_AUTOMATION') {
     startAutomation({
       commentText:    message.commentText || '',
-      reloadDelaySec: message.reloadDelaySec || 30,
+      commentTemplates: message.commentTemplates,
+      reloadDelaySec: message.reloadDelaySec ?? 30,
       originalUrl:    message.originalUrl,
       targetIndices:  message.targetIndices,
       peakConfig:     message.peakConfig,
@@ -1031,22 +1099,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
+// Dừng bảo vệ ngay cả khi popup đã cập nhật storage nhưng relay bị gián đoạn.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.isRunning?.newValue === false && automationRunning) {
+    stopAutomation();
+  }
+});
+
 // ─── Tự kiểm tra quyền chạy khi tải trang (Multi-Tab Isolation) ───────────────
 // Chỉ resume nếu đúng là tab được chỉ định automation. Các tab khác sẽ không chạy gì.
 chrome.runtime.sendMessage({ type: 'CHECK_SHOULD_RUN' }, (resp) => {
   if (chrome.runtime.lastError) return;
   if (resp && resp.shouldRun) {
-    setTimeout(() => {
-      if (!automationRunning) {
+    sleep(2500).then(() => {
+      // Đọc lại trạng thái: người dùng có thể đã bấm Dừng trong lúc chờ.
+      chrome.runtime.sendMessage({ type: 'CHECK_SHOULD_RUN' }, (current) => {
+        if (chrome.runtime.lastError || !current?.shouldRun || automationRunning) return;
         logEntry('🔄 Tiếp tục tự động hóa sau khi tải lại trang.');
         startAutomation({
-          commentText:    resp.commentText,
-          reloadDelaySec: resp.reloadDelaySec,
-          originalUrl:    resp.originalUrl,
-          targetIndices:  resp.targetIndices,
-          peakConfig:     resp.peakConfig,
+          commentText:    current.commentText,
+          commentTemplates: current.commentTemplates,
+          reloadDelaySec: current.reloadDelaySec,
+          originalUrl:    current.originalUrl,
+          targetIndices:  current.targetIndices,
+          peakConfig:     current.peakConfig,
         });
-      }
-    }, 2500);
+      });
+    });
   }
 });

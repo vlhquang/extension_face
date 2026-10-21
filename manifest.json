@@ -2,12 +2,14 @@
   "manifest_version": 3,
   "name": "FB Fanpage Auto",
   "version": "1.1.0",
+  "minimum_chrome_version": "120",
   "description": "Automate Facebook fanpage like and comment actions",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
     "tabs",
+    "alarms",
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess"
   ],

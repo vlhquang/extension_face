@@ -133,6 +133,46 @@ body {
   box-shadow: 0 0 0 3px rgba(24, 119, 242, 0.12);
 }
 
+.field-label, .resource-settings legend {
+  font-size: 11px;
+  font-weight: 700;
+  color: #606770;
+}
+
+.settings-hint {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #606770;
+}
+
+#comment-list { display: grid; gap: 8px; }
+.comment-card { display: grid; gap: 4px; }
+.comment-card-header { display: flex; align-items: center; justify-content: space-between; }
+.comment-card .remove-comment { min-height: 28px; padding: 4px 8px; }
+#add-comment-btn { align-self: flex-start; min-height: 32px; }
+#emoji-picker { font-size: 12px; padding: 6px 0; }
+#emoji-picker summary { cursor: pointer; padding: 6px 0; }
+.emoji-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 8px 0; }
+.emoji-button {
+  min-width: 32px;
+  min-height: 36px;
+  border: 1px solid #dddfe2;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 22px;
+  cursor: pointer;
+}
+.emoji-button:hover { background: #e7f3ff; }
+.emoji-button:focus-visible, .btn-icon-text:focus-visible, summary:focus-visible {
+  outline: 2px solid #1877f2;
+  outline-offset: 2px;
+}
+.resource-settings { padding: 8px 10px; border: 1.5px solid #dddfe2; border-radius: 8px; background: #fff; }
+.resource-settings legend { padding: 0 4px; }
+.resource-settings .checkbox-row { display: flex; align-items: center; gap: 8px; min-height: 32px; text-transform: none; letter-spacing: normal; font-size: 12px; }
+.checkbox-row input { accent-color: #1877f2; }
+
 /* Inline field (label + input side-by-side) */
 .field-inline {
   flex-direction: row;

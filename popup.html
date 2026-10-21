@@ -21,21 +21,24 @@
   <!-- ─── Main Content ───────────────────────────────────── -->
   <div class="content">
 
-    <!-- Comment Input -->
+    <!-- Comment templates -->
     <div class="field-group">
-      <label for="comment-input">💬 Nội dung bình luận</label>
-      <textarea
-        id="comment-input"
-        placeholder="Nhập nội dung bình luận tại đây..."
-        rows="3"
-      ></textarea>
+      <span class="field-label" id="comments-label">💬 Nội dung bình luận ngẫu nhiên</span>
+      <span class="settings-hint" id="comments-hint">Mỗi ô là một mẫu. Chọn ngẫu nhiên một mẫu cho mỗi bài viết; bỏ qua ô trống.</span>
+      <div id="comment-list" role="group" aria-labelledby="comments-label" aria-describedby="comments-hint"></div>
+      <button type="button" class="btn-icon-text" id="add-comment-btn">+ Thêm nội dung</button>
+      <details id="emoji-picker">
+        <summary>Chèn emoji vào ô đang chọn</summary>
+        <div id="emoji-grid" class="emoji-grid" role="group" aria-label="Emoji bình luận Facebook"></div>
+        <span class="settings-hint">Có thể nhập hoặc dán thêm emoji từ bàn phím.</span>
+      </details>
     </div>
 
     <!-- Reload Delay -->
     <div class="field-group field-inline">
       <label for="reload-delay">⏱ Reload sau (giây)</label>
       <div class="input-with-unit">
-        <input type="number" id="reload-delay" min="5" max="3600" value="30" />
+        <input type="number" id="reload-delay" min="0" step="any" value="30" />
         <span class="unit">giây</span>
       </div>
     </div>
@@ -81,12 +84,25 @@
         <div class="sub-row">
           <span>Reload trong khung giờ:</span>
           <div class="input-with-unit">
-            <input type="number" id="peak-reload-delay" min="3" max="3600" value="15" />
+            <input type="number" id="peak-reload-delay" min="0" step="any" value="15" />
             <span class="unit">giây</span>
           </div>
         </div>
       </div>
     </div>
+
+    <fieldset class="field-group resource-settings">
+      <legend>Tối ưu tải trang</legend>
+      <label class="checkbox-row" for="block-images">
+        <input type="checkbox" id="block-images" checked />
+        <span>Chặn tải hình ảnh</span>
+      </label>
+      <label class="checkbox-row" for="block-videos">
+        <input type="checkbox" id="block-videos" checked />
+        <span>Chặn tải video</span>
+      </label>
+      <span class="settings-hint">Chỉ áp dụng cho tab đang chạy. Giữ icon và emoji; có thể bật/tắt ngay khi chạy. Tải lại trang để áp dụng cho tài nguyên đã tải.</span>
+    </fieldset>
 
     <!-- Start / Stop Button -->
     <button class="btn btn-start" id="toggle-btn">▶ Bắt đầu</button>

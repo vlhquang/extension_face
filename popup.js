@@ -10,7 +10,11 @@
 'use strict';
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
-const commentInput     = document.getElementById('comment-input');
+const commentList      = document.getElementById('comment-list');
+const addCommentBtn    = document.getElementById('add-comment-btn');
+const emojiGrid        = document.getElementById('emoji-grid');
+const blockImagesEl    = document.getElementById('block-images');
+const blockVideosEl    = document.getElementById('block-videos');
 const reloadDelayEl    = document.getElementById('reload-delay');
 const modeLimitRadio   = document.getElementById('mode-limit');
 const modeCustomRadio  = document.getElementById('mode-custom');
@@ -39,6 +43,99 @@ let logPollTimer    = null;
 let lastLogCount    = 0;
 let allLogs         = [];
 let automationTabId = null;   // tabId đang chạy automation
+let activeCommentInput = null;
+let nextCommentId = 0;
+
+function getCommentTemplates() {
+  return Array.from(commentList.querySelectorAll('textarea'), input => input.value.trim()).filter(Boolean);
+}
+
+function saveComments() {
+  const drafts = Array.from(commentList.querySelectorAll('textarea'), input => input.value);
+  return chrome.storage.local.set({ commentTemplates: drafts, commentText: getCommentTemplates()[0] || '' });
+}
+
+function updateCommentLabels() {
+  const cards = commentList.querySelectorAll('.comment-card');
+  cards.forEach((card, index) => {
+    card.querySelector('label').textContent = `Bình luận ${index + 1}`;
+    const remove = card.querySelector('button');
+    remove.disabled = cards.length === 1;
+    remove.setAttribute('aria-label', `Xóa bình luận ${index + 1}`);
+  });
+}
+
+function addCommentInput(value = '', focus = false) {
+  const card = document.createElement('div');
+  card.className = 'comment-card';
+  const header = document.createElement('div');
+  header.className = 'comment-card-header';
+  const input = document.createElement('textarea');
+  input.id = `comment-template-${++nextCommentId}`;
+  input.rows = 2;
+  input.placeholder = 'Nhập nội dung, có thể xuống dòng và dùng emoji…';
+  input.value = value;
+  const label = document.createElement('label');
+  label.htmlFor = input.id;
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn-icon-text remove-comment';
+  remove.textContent = 'Xóa';
+  remove.addEventListener('click', () => {
+    card.remove();
+    if (activeCommentInput === input) {
+      activeCommentInput = commentList.querySelector('textarea');
+      activeCommentInput?.focus();
+    }
+    updateCommentLabels();
+    saveComments();
+  });
+  input.addEventListener('focus', () => { activeCommentInput = input; });
+  input.addEventListener('input', saveComments);
+  header.append(label, remove);
+  card.append(header, input);
+  commentList.appendChild(card);
+  if (!activeCommentInput) activeCommentInput = input;
+  updateCommentLabels();
+  if (focus) input.focus();
+}
+
+function initEmojiPicker() {
+  const emojis = [
+    ['😀', 'Vui vẻ'], ['😃', 'Cười tươi'], ['😄', 'Cười rạng rỡ'], ['😁', 'Cười toe'],
+    ['😆', 'Cười lớn'], ['😅', 'Cười ngượng'], ['😂', 'Cười ra nước mắt'], ['🤣', 'Cười lăn'],
+    ['😊', 'Mỉm cười'], ['🥰', 'Yêu thương'], ['😍', 'Mắt trái tim'], ['😘', 'Gửi nụ hôn'],
+    ['😉', 'Nháy mắt'], ['😎', 'Kính râm'], ['🤩', 'Ngưỡng mộ'], ['🥳', 'Ăn mừng'],
+    ['🥹', 'Xúc động'], ['😢', 'Buồn'], ['😭', 'Khóc'], ['😮', 'Ngạc nhiên'],
+    ['😡', 'Giận'], ['🤔', 'Suy nghĩ'], ['👍', 'Thích'], ['👎', 'Không thích'],
+    ['👏', 'Vỗ tay'], ['🙌', 'Hoan hô'], ['🙏', 'Cảm ơn'], ['💪', 'Cố lên'],
+    ['❤️', 'Trái tim'], ['💖', 'Trái tim lấp lánh'], ['💕', 'Hai trái tim'], ['🔥', 'Lửa'],
+    ['🎉', 'Chúc mừng'], ['🎁', 'Quà tặng'], ['🌹', 'Hoa hồng'], ['✨', 'Lấp lánh'],
+    ['⭐', 'Ngôi sao'], ['💯', 'Một trăm điểm'], ['✅', 'Đồng ý'], ['🍀', 'May mắn'],
+    ['🤝', 'Bắt tay'], ['🫶', 'Tay trái tim'],
+  ];
+  for (const [emoji, name] of emojis) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'emoji-button';
+    button.textContent = emoji;
+    button.title = name;
+    button.setAttribute('aria-label', `Chèn ${name}`);
+    button.addEventListener('click', () => {
+      const input = activeCommentInput?.isConnected ? activeCommentInput : commentList.querySelector('textarea');
+      if (!input) return;
+      input.setRangeText(emoji, input.selectionStart, input.selectionEnd, 'end');
+      input.focus();
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    emojiGrid.appendChild(button);
+  }
+}
+
+function parseReloadDelay(value, fallback) {
+  const number = Number(value);
+  return String(value).trim() !== '' && Number.isFinite(number) ? Math.max(0, number) : fallback;
+}
 
 // ─── Log utilities ────────────────────────────────────────────────────────────
 
@@ -221,7 +318,7 @@ function getPeakConfig() {
     enabled: peakEnableEl.checked,
     hours: peakHoursEl.value.trim() || '10, 12, 15, 17, 20',
     durationMin: Math.max(1, parseInt(peakDurationEl.value, 10) || 15),
-    reloadDelaySec: Math.max(3, parseInt(peakReloadDelayEl.value, 10) || 15),
+    reloadDelaySec: parseReloadDelay(peakReloadDelayEl.value, 15),
   };
 }
 
@@ -233,11 +330,15 @@ function savePeakConfig() {
 
 function init() {
   chrome.storage.local.get([
-    'commentText', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
-    'peakConfig', 'isRunning', 'automationTabId', 'logs'
+    'commentText', 'commentTemplates', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
+    'peakConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos'
   ], async (result) => {
     // Restore settings
-    if (result.commentText)        commentInput.value  = result.commentText;
+    const templates = Array.isArray(result.commentTemplates) && result.commentTemplates.length
+      ? result.commentTemplates.filter(text => typeof text === 'string') : [result.commentText || ''];
+    (templates.length ? templates : ['']).forEach(text => addCommentInput(text));
+    blockImagesEl.checked = result.blockImages !== false;
+    blockVideosEl.checked = result.blockVideos !== false;
     if (result.reloadDelaySec != null) reloadDelayEl.value = result.reloadDelaySec;
     if (result.postLimit != null)      postLimitEl.value   = result.postLimit;
     if (result.customPosts != null)    customPostsEl.value = result.customPosts;
@@ -283,12 +384,17 @@ function init() {
 // ─── Events ───────────────────────────────────────────────────────────────────
 
 // Save settings on change
-commentInput.addEventListener('input', () => {
-  chrome.storage.local.set({ commentText: commentInput.value });
+addCommentBtn.addEventListener('click', () => {
+  addCommentInput('', true);
+  saveComments();
 });
 
+[blockImagesEl, blockVideosEl].forEach(input => input.addEventListener('change', () => {
+  chrome.storage.local.set({ blockImages: blockImagesEl.checked, blockVideos: blockVideosEl.checked });
+}));
+
 reloadDelayEl.addEventListener('change', () => {
-  const val = Math.max(5, parseInt(reloadDelayEl.value, 10) || 30);
+  const val = parseReloadDelay(reloadDelayEl.value, 30);
   reloadDelayEl.value = val;
   chrome.storage.local.set({ reloadDelaySec: val });
 });
@@ -336,8 +442,9 @@ peakEnableEl.addEventListener('change', () => {
 toggleBtn.addEventListener('click', async () => {
   toggleBtn.disabled = true;
 
-  const commentTextVal  = commentInput.value.trim();
-  const reloadDelaySec  = Math.max(5, parseInt(reloadDelayEl.value, 10) || 30);
+  const commentTemplates = getCommentTemplates();
+  const commentTextVal  = commentTemplates[0] || '';
+  const reloadDelaySec  = parseReloadDelay(reloadDelayEl.value, 30);
   const targetMode      = modeCustomRadio.checked ? 'custom' : 'limit';
   const postLimit       = Math.max(1, parseInt(postLimitEl.value, 10) || 2);
   const customPosts     = customPostsEl.value.trim();
@@ -353,6 +460,9 @@ toggleBtn.addEventListener('click', async () => {
 
     await chrome.storage.local.set({
       commentText: commentTextVal,
+      commentTemplates,
+      blockImages: blockImagesEl.checked,
+      blockVideos: blockVideosEl.checked,
       reloadDelaySec,
       targetMode,
       postLimit,
@@ -365,6 +475,7 @@ toggleBtn.addEventListener('click', async () => {
     const resp = await sendToContent({
       type: 'START_AUTOMATION',
       commentText: commentTextVal,
+      commentTemplates,
       reloadDelaySec,
       targetIndices,
       peakConfig,
@@ -442,4 +553,5 @@ modalCopyBtn.addEventListener('click', () => {
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
+initEmojiPicker();
 init();

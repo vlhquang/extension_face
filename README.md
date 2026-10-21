@@ -21,6 +21,11 @@
 
 ## ✨ Tính Năng Nổi Bật
 
+- **Nhiều mẫu bình luận:** Bấm **Thêm nội dung** để tạo danh sách; mỗi ô là một mẫu riêng. Extension chọn ngẫu nhiên một mẫu cho mỗi bài và giữ nguyên mẫu đó khi retry. Ô trống được bỏ qua; cấu hình một bình luận cũ vẫn được giữ lại.
+- **Chèn emoji:** Chọn ô bình luận rồi mở **Chèn emoji vào ô đang chọn**. Emoji được chèn tại con trỏ hoặc thay đoạn đang chọn; cũng có thể nhập/dán emoji trực tiếp từ bàn phím.
+- **Thời gian reload từ 0 giây:** Cả lịch thường và lịch cao điểm nhận số không âm, gồm `0`, `0.5`, `1`… Giá trị `0` bỏ thời gian chờ reload, các thao tác xử lý bài vẫn có thời gian thực thi riêng.
+- **Tùy chọn chặn ảnh/video:** Bật/tắt độc lập trong **Tối ưu tải trang**, áp dụng ngay cho yêu cầu tải mới của tab đang chạy. Rule theo phiên giữ icon/emoji trên CDN giao diện, được gỡ khi dừng/đóng tab. Tải lại trang để áp dụng cho tài nguyên đã tải trước đó.
+
 - **Tự động nhận diện bài viết:** Quét trực tiếp danh sách bài viết trong `div[data-pagelet="ProfileTimeline"]` (chính xác từng unit bài viết `TimelineFeedUnit`).
 - **Lựa chọn phạm vi quét linh hoạt:**
   - *Quét N bài mới nhất* (mặc định 2 bài đầu trang `[0, 1]`).
@@ -80,11 +85,13 @@
 
 ### 2. Thiết lập cấu hình trên Popup
 Click vào biểu tượng extension trên thanh công cụ để mở bảng điều khiển:
-- **Nội dung bình luận:** Nhập đoạn văn bản bạn muốn tự động bình luận vào bài viết.
+- **Nội dung bình luận:** Nhập một hoặc nhiều mẫu bằng nút **Thêm nội dung**; một mẫu sẽ được chọn ngẫu nhiên cho mỗi bài. Chọn ô rồi dùng bộ chọn emoji để chèn biểu tượng.
 - **Phạm vi quét bài:**
   - Chọn *Duyệt qua số bài mới nhất* (nhập số lượng bài, ví dụ: `2`).
   - Hoặc chọn *Chỉ định thứ tự bài viết test* (nhập danh sách chỉ số, ví dụ: `0` là bài đầu tiên, `4` là bài thứ 5).
 - **Thời gian chờ Reload bình thường (giây):** Thời gian nghỉ giữa các chu kỳ quét (ví dụ: `60` giây).
+  - Cho phép `0` và số thập phân như `0.5`, không còn mức tối thiểu 5 giây.
+- **Tối ưu tải trang:** Chọn **Chặn tải hình ảnh** và/hoặc **Chặn tải video**. Chỉ tab tự động hóa bị tác động; ảnh giao diện/emoji vẫn được tải.
 - **Cấu hình Khung giờ cao điểm (Tùy chọn):**
   - Tích chọn *Kích hoạt cấu hình khung giờ cao điểm*.
   - Nhập các mốc giờ cách nhau bằng dấu phẩy (ví dụ: `10, 12, 15, 17, 20`).
@@ -154,6 +161,8 @@ Hàm `getReloadScheduleInfo()` trong [content.js](file:///Users/quangvlh/work/ex
 
 Extension lưu trữ trạng thái người dùng trong `chrome.storage.local`:
 
+Các cấu hình mới: `commentTemplates` (mảng chuỗi), `blockImages` và `blockVideos` (boolean). `commentText` được giữ để tương thích cấu hình cũ. Danh sách mẫu và lịch reload được đọc khi bắt đầu hoặc tải lại trang; tùy chọn chặn tải được cập nhật ngay trong lúc chạy.
+
 | Khóa (Key) | Kiểu dữ liệu | Mô tả |
 | :--- | :--- | :--- |
 | `commentText` | `string` | Nội dung văn bản bình luận |
@@ -173,6 +182,8 @@ Extension lưu trữ trạng thái người dùng trong `chrome.storage.local`:
 ---
 
 ## ❓ Xử Lý Lỗi Thường Gặp (Troubleshooting)
+
+Kiểm tra logic cấu hình, chọn mẫu, lịch reload và rule chặn tài nguyên bằng Node.js: `node --test tests/config.test.cjs`. Bộ kiểm thử dùng API mô phỏng và không gửi bình luận lên Facebook.
 
 1. **Không mở được popup hoặc bị báo "không tìm thấy nút like":**
    - Đảm bảo bạn đang mở đúng trang Fanpage dạng dòng thời gian chuẩn của Facebook.
