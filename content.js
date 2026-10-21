@@ -195,33 +195,14 @@ async function insertTextIntoLexical(textbox, text) {
     document.execCommand('delete', false, null);
     await sleep(60);
 
-    // Step 4: Chèn text mới đúng một lần
-    let success = document.execCommand('insertText', false, text);
+    // Chỉ chèn một lần. Không paste/chèn thêm khi execCommand trả false
+    // hoặc DOM chưa cập nhật, vì Lexical có thể đã nhận nội dung.
+    document.execCommand('insertText', false, text);
 
-    // Step 5: Fallback qua Clipboard nếu execCommand không thành công
-    if (!success || textbox.textContent.trim() === '') {
-      try {
-        const dt = new DataTransfer();
-        dt.setData('text/plain', text);
-        textbox.dispatchEvent(new ClipboardEvent('paste', {
-          clipboardData: dt,
-          bubbles: true,
-          cancelable: true,
-        }));
-        await sleep(150);
-      } catch (_) {}
-    }
-
-    // Step 6: Fallback thứ 2: gán text qua textContent/InputEvent nếu vẫn rỗng
-    if (textbox.textContent.trim() === '') {
-      const p = textbox.querySelector('p') || textbox;
-      p.textContent = text;
-      textbox.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      await sleep(100);
-    }
-
-    await sleep(100);
-    return textbox.textContent.trim().length > 0;
+    await sleep(250);
+    // Nội dung bị lặp hoặc chưa nhập được không được coi là thành công.
+    const expected = text.trim();
+    return expected.length > 0 && textbox.textContent.trim() === expected;
   } catch (err) {
     console.error('[FB Fanpage Auto] insertTextIntoLexical error:', err);
     return false;
