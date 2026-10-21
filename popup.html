@@ -91,6 +91,31 @@
       </div>
     </div>
 
+    <div class="field-group">
+      <div class="field-inline peak-header">
+        <label for="quiet-enable">Khung giờ ít bài</label>
+        <input type="checkbox" id="quiet-enable" checked />
+      </div>
+      <div id="quiet-settings-box" class="sub-settings-box">
+        <div class="sub-row">
+          <label for="quiet-start">Từ giờ:</label>
+          <input type="time" id="quiet-start" value="00:00" required />
+        </div>
+        <div class="sub-row">
+          <label for="quiet-end">Đến giờ:</label>
+          <input type="time" id="quiet-end" value="07:00" required />
+        </div>
+        <div class="sub-row">
+          <label for="quiet-reload-delay">Reload trong khung giờ:</label>
+          <div class="input-with-unit">
+            <input type="number" id="quiet-reload-delay" min="0" step="any" value="300" />
+            <span class="unit">giây</span>
+          </div>
+        </div>
+        <span class="settings-hint">Theo giờ trên máy. Ưu tiên hơn giờ cao điểm; có thể đặt khoảng giờ qua nửa đêm.</span>
+      </div>
+    </div>
+
     <fieldset class="field-group resource-settings">
       <legend>Tối ưu tải trang</legend>
       <label class="checkbox-row" for="block-images">

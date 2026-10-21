@@ -88,7 +88,7 @@ function content(historyServer = null) {
     document: {}, setTimeout, clearTimeout,
   });
   vm.runInContext(read('content.js'), ctx);
-  vm.runInContext('startLoop = async () => {}; logEntry = () => {};', ctx);
+  vm.runInContext('startLoop = async () => {}; logEntry = () => {}; quietHoursConfig.enabled = false;', ctx);
   return ctx;
 }
 
@@ -142,7 +142,7 @@ test('countdown respects a fractional delay and allows zero without adding a sec
     vm.runInContext(`
       automationRunning = true; targetIndices = [0]; reloadDelaySec = testDelay;
       peakConfig.enabled = false; processedPostLinks.add('post');
-      document.querySelector = () => ({}); findPostElement = async () => ({});
+      document.querySelector = () => ({ querySelectorAll: () => [{}] }); findPostElement = async () => ({});
       getPostLink = () => 'post'; processPost = async () => true;
       var delays = []; sleep = async ms => { delays.push(ms); };
     `, ctx);
@@ -160,7 +160,7 @@ function scanCycleContext(scenario = {}) {
     automationRunning = true; targetIndices = [0, 1]; reloadDelaySec = 2;
     peakConfig.enabled = false;
     var checkedPosts = [], cycleWaits = [], reloadRequests = 0;
-    document.querySelector = () => ({});
+    document.querySelector = () => ({ querySelectorAll: () => [{}] });
     findPostElement = async (timeline, index) => scenario.missing === index ? null : { index };
     getPostLink = post => 'post-' + post.index;
     processPost = async (post, index) => {
@@ -328,7 +328,7 @@ function handledPostContext(server, { link = 'https://www.facebook.com/page/post
       scrollIntoView() { scrollCalls++; },
       querySelector() { return testAlreadyLiked ? {} : null; }
     };
-    document.querySelector = () => ({});
+    document.querySelector = () => ({ querySelectorAll: () => [{}] });
     findPostElement = async (timeline, index, shouldScroll) => {
       if (shouldScroll !== false) throw new Error('Cached lookup should not scroll');
       return fakePost;
@@ -408,6 +408,7 @@ test('already-liked posts keep the existing skip behavior and are remembered', a
   await ctx.runCycle();
   assert.deepEqual([...server.state.processedPostHistory.keys], ['post:123']);
   assert.equal(vm.runInContext('commentCalls', ctx), 0);
+  assert.equal(vm.runInContext('scrollCalls', ctx), 0);
 });
 
 test('unidentified posts can finish the cycle but never persist a positional fallback', async () => {
@@ -495,4 +496,149 @@ test('extension update preserves stored post history', async () => {
   await server.chrome.runtime.onInstalled.listeners[0]();
   assert.equal(server.state.processedPostHistory.generation, 3);
   assert.deepEqual(server.state.processedPostHistory.keys, ['post:111']);
+});
+
+function waitingTimelineContext() {
+  const ctx = content();
+  const observers = [], timeouts = [];
+  ctx.MutationObserver = class {
+    constructor(callback) { this.callback = callback; this.disconnected = false; observers.push(this); }
+    observe(root, options) { this.root = root; this.options = options; }
+    disconnect() { this.disconnected = true; }
+  };
+  ctx.document.documentElement = {};
+  ctx.timelineNode = null;
+  ctx.document.querySelector = () => ctx.timelineNode;
+  ctx.sleep = ms => new Promise(resolve => timeouts.push({ ms, resolve }));
+  vm.runInContext('automationRunning = true', ctx);
+  return { ctx, observers, timeouts };
+}
+
+test('ready timeline starts immediately with no fixed startup timer', async () => {
+  const { ctx, observers, timeouts } = waitingTimelineContext();
+  const timeline = { querySelectorAll: () => [{}] };
+  ctx.timelineNode = timeline;
+  assert.equal(await ctx.waitForTimeline(), timeline);
+  assert.equal(observers.length, 0);
+  assert.equal(timeouts.length, 0);
+});
+
+test('timeline wait resolves when the first post mounts and disconnects its observer', async () => {
+  const { ctx, observers, timeouts } = waitingTimelineContext();
+  let posts = [];
+  const timeline = { querySelectorAll: () => posts };
+  ctx.timelineNode = timeline;
+  const waiting = ctx.waitForTimeline();
+  assert.equal(observers.length, 1);
+  assert.equal(timeouts[0].ms, 10000);
+  assert.equal(observers[0].disconnected, false);
+  posts = [{}];
+  observers[0].callback();
+  assert.equal(await waiting, timeline);
+  assert.equal(observers[0].disconnected, true);
+  // An old timeout must not inspect the DOM after resolution.
+  ctx.document.querySelector = () => { throw Error('Late timeout queried DOM'); };
+  timeouts[0].resolve();
+  await Promise.resolve();
+});
+
+test('stop or timeout cancels a pending timeline wait', async () => {
+  for (const stop of [true, false]) {
+    const { ctx, observers, timeouts } = waitingTimelineContext();
+    const waiting = ctx.waitForTimeline();
+    if (stop) ctx.stopAutomation();
+    else timeouts[0].resolve();
+    assert.equal(await waiting, null);
+    assert.equal(observers[0].disconnected, true);
+    assert.equal(vm.runInContext('cancelTimelineWait', ctx), null);
+  }
+});
+
+test('resume bootstrap forwards settings immediately and respects stored Stop', () => {
+  const source = read('content.js');
+  const bootstrap = source.slice(source.indexOf('// ─── Tự kiểm tra quyền chạy'));
+  for (const shouldRun of [true, false]) {
+    const calls = [];
+    const quietHoursConfig = { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 600 };
+    const ctx = vm.createContext({
+      automationRunning: false, logEntry() {},
+      sleep() { throw Error('Resume should not sleep'); },
+      startAutomation(config) { calls.push(config); },
+      chrome: { runtime: { sendMessage(message, callback) { callback({ shouldRun, quietHoursConfig }); } } },
+    });
+    vm.runInContext(bootstrap, ctx);
+    assert.equal(calls.length, shouldRun ? 1 : 0);
+    if (shouldRun) assert.equal(calls[0].quietHoursConfig.reloadDelaySec, 600);
+  }
+});
+
+function quietScheduleContext(config = {}) {
+  const ctx = content();
+  ctx.testQuiet = { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 300, ...config };
+  vm.runInContext(`
+    quietHoursConfig = testQuiet; reloadDelaySec = 30;
+    peakConfig = { enabled: false };
+  `, ctx);
+  return ctx;
+}
+const localClock = (hour, minute = 0, second = 0) => new Date(2026, 9, 21, hour, minute, second);
+
+test('quiet schedule includes midnight, excludes 07:00, and falls back to normal', () => {
+  const ctx = quietScheduleContext();
+  for (const [hour, minute] of [[0, 0], [0, 1], [6, 59]]) {
+    const schedule = ctx.getReloadScheduleInfo(localClock(hour, minute));
+    assert.equal(schedule.inQuiet, true);
+    assert.equal(schedule.currentDelay, 300);
+    assert.equal(new Date(schedule.untilTime).getHours(), 7);
+  }
+  for (const hour of [7, 12, 23]) assert.equal(ctx.getReloadScheduleInfo(localClock(hour)).currentDelay, 30);
+});
+
+test('quiet schedule takes priority over peak hours and supports overnight/custom/zero delays', () => {
+  const ctx = quietScheduleContext({ startTime: '22:00', endTime: '07:30', reloadDelaySec: 0 });
+  vm.runInContext("peakConfig = { enabled: true, hours: '0, 7, 22', durationMin: 60, reloadDelaySec: 5 }", ctx);
+  for (const hour of [0, 7, 22, 23]) {
+    const schedule = ctx.getReloadScheduleInfo(localClock(hour));
+    assert.equal(schedule.inQuiet, true);
+    assert.equal(schedule.currentDelay, 0);
+    assert.equal(new Date(schedule.untilTime).getMinutes(), 30);
+  }
+  assert.equal(ctx.getReloadScheduleInfo(localClock(7, 30)).inPeak, true);
+  ctx.testQuiet.reloadDelaySec = 0.5;
+  assert.equal(ctx.getReloadScheduleInfo(localClock(23)).currentDelay, 0.5);
+  ctx.testQuiet.enabled = false;
+  assert.equal(ctx.getReloadScheduleInfo(localClock(22)).currentDelay, 5);
+  ctx.testQuiet.enabled = true;
+  ctx.testQuiet.startTime = ctx.testQuiet.endTime;
+  assert.equal(ctx.getReloadScheduleInfo(localClock(22)).currentDelay, 5);
+});
+
+test('quiet countdown is capped at its ending time', async () => {
+  const ctx = scanCycleContext();
+  ctx.fakeNow = Date.now();
+  vm.runInContext(`
+    getReloadScheduleInfo = () => ({ inQuiet: true, currentDelay: 300, untilTime: fakeNow + 2000, currentSlotStr: '00:00 - 07:00' });
+  `, ctx);
+  ctx.Date = class extends Date { static now() { return ctx.fakeNow; } };
+  await ctx.runCycle();
+  assert.equal(ctx.reloadRequests, 1);
+  assert.deepEqual([...ctx.cycleWaits], [400, 400, 1000, 1000]);
+});
+
+test('quiet settings survive stored resume, extension updates, and content start messages', async () => {
+  const quietHoursConfig = { enabled: true, startTime: '23:00', endTime: '06:30', reloadDelaySec: 600 };
+  const server = background({ isRunning: true, automationTabId: 7, quietHoursConfig });
+  const response = await new Promise(resolve => server.chrome.runtime.onMessage.listeners[0](
+    { type: 'CHECK_SHOULD_RUN' }, { tab: { id: 7 } }, resolve));
+  assert.deepEqual(response.quietHoursConfig, quietHoursConfig);
+  const ctx = content();
+  ctx.chrome.runtime.onMessage.listeners[0]({ type: 'START_AUTOMATION', quietHoursConfig }, {}, () => {});
+  assert.equal(ctx.getReloadScheduleInfo(localClock(23)).currentDelay, 600);
+  await server.chrome.runtime.onInstalled.listeners[0]();
+  assert.deepEqual(server.state.quietHoursConfig, quietHoursConfig);
+  const fresh = background();
+  await fresh.chrome.runtime.onInstalled.listeners[0]();
+  assert.equal(fresh.state.quietHoursConfig.startTime, '00:00');
+  assert.equal(fresh.state.quietHoursConfig.endTime, '07:00');
+  assert.equal(fresh.state.quietHoursConfig.reloadDelaySec, 300);
 });

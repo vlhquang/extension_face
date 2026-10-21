@@ -28,6 +28,11 @@ const peakHoursEl      = document.getElementById('peak-hours');
 const peakDurationEl   = document.getElementById('peak-duration');
 const peakReloadDelayEl= document.getElementById('peak-reload-delay');
 const peakSettingsBox  = document.getElementById('peak-settings-box');
+const quietEnableEl = document.getElementById('quiet-enable');
+const quietStartEl = document.getElementById('quiet-start');
+const quietEndEl = document.getElementById('quiet-end');
+const quietReloadDelayEl = document.getElementById('quiet-reload-delay');
+const quietSettingsBox = document.getElementById('quiet-settings-box');
 const toggleBtn        = document.getElementById('toggle-btn');
 const statusDot        = document.getElementById('status-dot');
 const statusText       = document.getElementById('status-text');
@@ -360,12 +365,38 @@ function savePeakConfig() {
   chrome.storage.local.set({ peakConfig: getPeakConfig() });
 }
 
+function updateQuietUI(enabled) {
+  quietEnableEl.checked = enabled;
+  quietSettingsBox.classList.toggle('disabled', !enabled);
+  for (const input of [quietStartEl, quietEndEl, quietReloadDelayEl]) input.disabled = !enabled;
+}
+
+function getQuietHoursConfig() {
+  return {
+    enabled: quietEnableEl.checked,
+    startTime: quietStartEl.value || '00:00',
+    endTime: quietEndEl.value || '07:00',
+    reloadDelaySec: parseReloadDelay(quietReloadDelayEl.value, 300),
+  };
+}
+
+function validateQuietHours() {
+  const config = getQuietHoursConfig();
+  quietEndEl.setCustomValidity(config.enabled && config.startTime === config.endTime
+    ? 'Giờ kết thúc phải khác giờ bắt đầu.' : '');
+  return !config.enabled || (quietStartEl.checkValidity() && quietEndEl.checkValidity());
+}
+
+function saveQuietHoursConfig() {
+  if (validateQuietHours()) chrome.storage.local.set({ quietHoursConfig: getQuietHoursConfig() });
+}
+
 // ─── Initialization ───────────────────────────────────────────────────────────
 
 function init() {
   chrome.storage.local.get([
     'commentText', 'commentTemplates', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
-    'peakConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos', 'processedPostHistory'
+    'peakConfig', 'quietHoursConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos', 'processedPostHistory'
   ], async (result) => {
     // Restore settings
     const templates = Array.isArray(result.commentTemplates) && result.commentTemplates.length
@@ -391,6 +422,11 @@ function init() {
     if (peakConfig.hours)              peakHoursEl.value       = peakConfig.hours;
     if (peakConfig.durationMin != null) peakDurationEl.value   = peakConfig.durationMin;
     if (peakConfig.reloadDelaySec != null) peakReloadDelayEl.value = peakConfig.reloadDelaySec;
+    const quiet = result.quietHoursConfig || {};
+    updateQuietUI(quiet.enabled !== false);
+    quietStartEl.value = quiet.startTime || '00:00';
+    quietEndEl.value = quiet.endTime || '07:00';
+    quietReloadDelayEl.value = quiet.reloadDelaySec ?? 300;
 
     // Restore all logs
     const logs = result.logs || [];
@@ -473,6 +509,12 @@ peakEnableEl.addEventListener('change', () => {
   el.addEventListener('change', savePeakConfig);
 });
 
+quietEnableEl.addEventListener('change', () => {
+  updateQuietUI(quietEnableEl.checked);
+  saveQuietHoursConfig();
+});
+[quietStartEl, quietEndEl, quietReloadDelayEl].forEach(input => input.addEventListener('change', saveQuietHoursConfig));
+
 // Start / Stop toggle
 toggleBtn.addEventListener('click', async () => {
   toggleBtn.disabled = true;
@@ -485,8 +527,15 @@ toggleBtn.addEventListener('click', async () => {
   const customPosts     = customPostsEl.value.trim();
   const targetIndices   = getTargetIndices();
   const peakConfig      = getPeakConfig();
+  const quietHoursConfig = getQuietHoursConfig();
 
   if (!isRunning) {
+    if (!validateQuietHours()) {
+      if (!quietStartEl.reportValidity()) quietStartEl.focus();
+      else quietEndEl.reportValidity();
+      toggleBtn.disabled = false;
+      return;
+    }
     if (!commentTextVal) {
       alert('Vui lòng nhập nội dung bình luận trước khi bắt đầu.');
       toggleBtn.disabled = false;
@@ -504,6 +553,7 @@ toggleBtn.addEventListener('click', async () => {
       customPosts,
       targetIndices,
       peakConfig,
+      quietHoursConfig,
       isRunning: true
     });
 
@@ -514,6 +564,7 @@ toggleBtn.addEventListener('click', async () => {
       reloadDelaySec,
       targetIndices,
       peakConfig,
+      quietHoursConfig,
     });
     if (resp && resp.error) {
       pushEntryToUI({ timestamp: Date.now(), text: `⚠ Lỗi: ${resp.error}` });

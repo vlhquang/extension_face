@@ -172,6 +172,8 @@ body {
 .resource-settings legend { padding: 0 4px; }
 .resource-settings .checkbox-row { display: flex; align-items: center; gap: 8px; min-height: 32px; text-transform: none; letter-spacing: normal; font-size: 12px; }
 .checkbox-row input { accent-color: #1877f2; }
+.sub-row input[type="time"] { width: 104px; padding: 4px 6px; border: 1.5px solid #dddfe2; border-radius: 6px; font: inherit; background: #fff; }
+.sub-row label { text-transform: none; letter-spacing: normal; font-size: 12px; }
 
 /* Inline field (label + input side-by-side) */
 .field-inline {

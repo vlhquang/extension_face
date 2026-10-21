@@ -21,6 +21,13 @@ const postCommentChoices = new Map();
 let reloadDelaySec    = 30;
 let originalUrl       = '';
 let targetIndices     = [0, 1]; // Danh sách các bài cần quét (mặc định: 0, 1)
+let cancelTimelineWait = null;
+let quietHoursConfig = {
+  enabled: true,
+  startTime: '00:00',
+  endTime: '07:00',
+  reloadDelaySec: 300,
+};
 
 // Cấu hình khung giờ cao điểm (mặc định: 10, 12, 15, 17, 20h)
 let peakConfig = {
@@ -147,18 +154,38 @@ function releaseAutomationLock() {
 // ─── Utility: Tính toán thời gian reload theo khung giờ cao điểm ───────────────
 
 /**
- * Kiểm tra xem thời điểm hiện tại có đang nằm trong khung giờ cao điểm hay không.
- * Các khung giờ cố định mặc định: 10h, 12h, 15h, 17h, 20h.
- * Mỗi khung giờ duy trì trong peakConfig.durationMin phút (mặc định 15 phút).
- * @returns {{ inPeak: boolean, currentDelay: number, currentSlotStr: string }}
+ * Chọn lịch theo thứ tự ưu tiên: ít bài, cao điểm, bình thường.
+ * Dùng giờ địa phương; khoảng ít bài bao gồm giờ bắt đầu, không bao gồm giờ kết thúc.
+ * @returns {{ inQuiet?: boolean, inPeak: boolean, currentDelay: number, currentSlotStr: string, untilTime?: number }}
  */
-function getReloadScheduleInfo() {
+function parseClockMinutes(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value || '');
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function getReloadScheduleInfo(now = new Date()) {
+  const currentMinsOfDay = now.getHours() * 60 + now.getMinutes();
+  const start = parseClockMinutes(quietHoursConfig?.startTime);
+  const end = parseClockMinutes(quietHoursConfig?.endTime);
+  const inQuiet = quietHoursConfig?.enabled && start !== null && end !== null && start !== end &&
+    (start < end ? currentMinsOfDay >= start && currentMinsOfDay < end
+      : currentMinsOfDay >= start || currentMinsOfDay < end);
+  if (inQuiet) {
+    const until = new Date(now);
+    until.setHours(Math.floor(end / 60), end % 60, 0, 0);
+    if (until <= now) until.setDate(until.getDate() + 1);
+    return {
+      inQuiet: true, inPeak: false,
+      currentDelay: parseReloadDelay(quietHoursConfig.reloadDelaySec, 300),
+      currentSlotStr: `${quietHoursConfig.startTime} - ${quietHoursConfig.endTime}`,
+      untilTime: until.getTime(),
+    };
+  }
+
   if (!peakConfig || !peakConfig.enabled) {
     return { inPeak: false, currentDelay: reloadDelaySec, currentSlotStr: '' };
   }
-
-  const now = new Date();
-  const currentMinsOfDay = now.getHours() * 60 + now.getMinutes();
 
   // Tách danh sách các giờ (ví dụ: '10, 12, 15, 17, 20')
   const hours = (peakConfig.hours || '10, 12, 15, 17, 20')
@@ -728,12 +755,6 @@ async function processPost(postEl, index) {
 
   if (postKey && processedPostLinks.has(postKey)) return true;
 
-  // Cuộn bài viết vào giữa màn hình để Facebook mount DOM và hiển thị đầy đủ
-  try {
-    postEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await sleep(400);
-  } catch (_) {}
-
   // ── B2-1: Nếu bài đã được like → bỏ qua cả like lẫn comment ─────────────
   const unlikeBtn    = postEl.querySelector('[aria-label="Gỡ Thích"], [aria-label="Remove like"]');
   const alreadyLiked = !!unlikeBtn;
@@ -1045,6 +1066,43 @@ async function findPostElement(timeline, index, scrollToPost = true) {
 
 // ─── Core: One full scan cycle ────────────────────────────────────────────────
 
+function waitForTimeline(timeout = 10000) {
+  const findReady = () => {
+    const timeline = document.querySelector('div[data-pagelet="ProfileTimeline"]');
+    return timeline && getOrderedTimelinePosts(timeline).length ? timeline : null;
+  };
+  if (!automationRunning) return Promise.resolve(null);
+  const ready = findReady();
+  if (ready) return Promise.resolve(ready);
+
+  // Bắt đầu ngay khi timeline có bài, không chờ một khoảng cố định sau reload.
+  return new Promise(resolve => {
+    let finished = false;
+    const finish = value => {
+      if (finished) return;
+      finished = true;
+      observer.disconnect();
+      if (cancelTimelineWait === cancel) cancelTimelineWait = null;
+      resolve(value);
+    };
+    const cancel = () => finish(null);
+    const observer = new MutationObserver(() => {
+      if (!automationRunning) return finish(null);
+      const timeline = findReady();
+      if (timeline) finish(timeline);
+    });
+    cancelTimelineWait = cancel;
+    observer.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['data-pagelet'],
+    });
+    const timeline = findReady();
+    if (timeline) finish(timeline);
+    sleep(timeout).then(() => {
+      if (!finished) finish(automationRunning ? findReady() : null);
+    });
+  });
+}
+
 async function runCycle() {
   if (!automationRunning) return;
 
@@ -1056,9 +1114,9 @@ async function runCycle() {
   }
   if (!automationRunning) return;
 
-  const timeline = document.querySelector('div[data-pagelet="ProfileTimeline"]');
+  const timeline = await waitForTimeline();
   if (!timeline) {
-    logEntry('⚠ Không tìm thấy ProfileTimeline – đang ở đúng trang fanpage chưa?');
+    if (automationRunning) logEntry('⚠ Timeline chưa có bài sẵn sàng; sẽ thử lại.');
     return;
   }
 
@@ -1092,9 +1150,14 @@ async function runCycle() {
   // Nếu tất cả bài trong danh sách chỉ định đã like + comment xong → reload về URL gốc
   if (allDone && automationRunning) {
     const sched = getReloadScheduleInfo();
-    const effectiveDelay = sched.currentDelay;
+    // Không để khoảng chờ ban đêm kéo dài quá giờ kết thúc (mặc định 07:00).
+    const effectiveDelay = sched.inQuiet
+      ? Math.min(sched.currentDelay, Math.max(0, (sched.untilTime - Date.now()) / 1000))
+      : sched.currentDelay;
 
-    if (sched.inPeak) {
+    if (sched.inQuiet) {
+      logEntry(`🌙 [KHUNG GIỜ ÍT BÀI ${sched.currentSlotStr}] Reload sau ${effectiveDelay}s`);
+    } else if (sched.inPeak) {
       logEntry(`⚡ [KHUNG GIỜ CAO ĐIỂM ${sched.currentSlotStr}] Dùng thời gian reload riêng: ${effectiveDelay}s`);
     } else {
       logEntry(`ℹ Tất cả bài chỉ định đã xong. Reload sau ${effectiveDelay} giây…`);
@@ -1153,14 +1216,18 @@ function startAutomation(config) {
   if (config.peakConfig) {
     peakConfig = config.peakConfig;
   }
+  if (config.quietHoursConfig) {
+    quietHoursConfig = config.quietHoursConfig;
+  }
 
   // Lưu chắc chắn originalUrl và trạng thái vào storage
   chrome.storage.local.set({ isRunning: true, originalUrl });
 
   const sched = getReloadScheduleInfo();
-  const schedNote = sched.inPeak
-    ? `⚡ Khung giờ cao điểm: ${sched.currentDelay}s (duy trì ${sched.currentSlotStr})`
-    : `Reload thường: ${reloadDelaySec}s`;
+  const schedNote = sched.inQuiet
+    ? `🌙 Khung giờ ít bài ${sched.currentSlotStr}: ${sched.currentDelay}s`
+    : sched.inPeak ? `⚡ Khung giờ cao điểm: ${sched.currentDelay}s (duy trì ${sched.currentSlotStr})`
+      : `Reload thường: ${reloadDelaySec}s`;
 
   const targetDesc = targetIndices.map(i => `${i} (bài ${i + 1})`).join(', ');
   logEntry(`▶ Bắt đầu tự động hóa: Quét bài [${targetDesc}] | ${schedNote}`);
@@ -1169,6 +1236,7 @@ function startAutomation(config) {
 
 function stopAutomation() {
   automationRunning = false;
+  if (cancelTimelineWait) cancelTimelineWait();
   releaseAutomationLock();
   logEntry('⏹ Đã dừng tự động hóa.');
 }
@@ -1184,6 +1252,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       originalUrl:    message.originalUrl,
       targetIndices:  message.targetIndices,
       peakConfig:     message.peakConfig,
+      quietHoursConfig: message.quietHoursConfig,
     });
     sendResponse({ ok: true });
     return true;
@@ -1215,21 +1284,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // Chỉ resume nếu đúng là tab được chỉ định automation. Các tab khác sẽ không chạy gì.
 chrome.runtime.sendMessage({ type: 'CHECK_SHOULD_RUN' }, (resp) => {
   if (chrome.runtime.lastError) return;
-  if (resp && resp.shouldRun) {
-    sleep(2500).then(() => {
-      // Đọc lại trạng thái: người dùng có thể đã bấm Dừng trong lúc chờ.
-      chrome.runtime.sendMessage({ type: 'CHECK_SHOULD_RUN' }, (current) => {
-        if (chrome.runtime.lastError || !current?.shouldRun || automationRunning) return;
-        logEntry('🔄 Tiếp tục tự động hóa sau khi tải lại trang.');
-        startAutomation({
-          commentText:    current.commentText,
-          commentTemplates: current.commentTemplates,
-          reloadDelaySec: current.reloadDelaySec,
-          originalUrl:    current.originalUrl,
-          targetIndices:  current.targetIndices,
-          peakConfig:     current.peakConfig,
-        });
-      });
+  if (resp?.shouldRun && !automationRunning) {
+    logEntry('🔄 Tiếp tục tự động hóa sau khi tải lại trang.');
+    startAutomation({
+      commentText: resp.commentText,
+      commentTemplates: resp.commentTemplates,
+      reloadDelaySec: resp.reloadDelaySec,
+      originalUrl: resp.originalUrl,
+      targetIndices: resp.targetIndices,
+      peakConfig: resp.peakConfig,
+      quietHoursConfig: resp.quietHoursConfig,
     });
   }
 });

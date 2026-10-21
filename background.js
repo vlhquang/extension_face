@@ -88,7 +88,7 @@ function getStoredState() {
     chrome.storage.local.get(
       [
         'automationTabId', 'isRunning', 'commentText', 'commentTemplates', 'reloadDelaySec',
-        'originalUrl', 'targetIndices', 'peakConfig', 'backgroundGuardTab', 'blockImages', 'blockVideos'
+        'originalUrl', 'targetIndices', 'peakConfig', 'quietHoursConfig', 'backgroundGuardTab', 'blockImages', 'blockVideos'
       ],
       (res) => resolve(res || {})
     );
@@ -284,6 +284,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         originalUrl:    state.originalUrl || '',
         targetIndices:  state.targetIndices || [0, 1],
         peakConfig:     state.peakConfig || null,
+        quietHoursConfig: state.quietHoursConfig || { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 300 },
       });
     });
     return true;
@@ -403,6 +404,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     reloadDelaySec: 30,
     blockImages: true,
     blockVideos: true,
+    quietHoursConfig: { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 300 },
     originalUrl: '',
     logs: [],
   };
