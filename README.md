@@ -21,6 +21,9 @@
 
 ## ✨ Tính Năng Nổi Bật
 
+- **Bắt đầu ngay khi timeline sẵn sàng:** Không còn chờ cố định 2,5 giây sau reload. Nếu timeline chưa có bài, theo dõi thay đổi DOM tối đa 10 giây rồi thử lại; bấm Dừng hủy việc chờ.
+- **Kiểm tra bài trực tiếp trên DOM:** Kiểm tra lịch sử và trạng thái đã like trước khi di chuyển view. Chỉ cuộn khi cần tải thêm bài chưa được render hoặc khi thao tác tương tác cần tới ô/nút đó.
+- **Khung giờ ít bài:** Mặc định bật từ `00:00` đến trước `07:00`, reload mỗi `300` giây. Có thể đổi giờ, khoảng chờ (kể cả `0`/số thập phân) hoặc tắt. Hỗ trợ khoảng giờ qua nửa đêm như `22:00–07:00`; ưu tiên lịch ít bài > cao điểm > thường, theo giờ trên máy. Khoảng chờ được giới hạn tại giờ kết thúc để chuyển lại lịch ban ngày đúng giờ.
 - **Nhớ bài đã xử lý:** Lưu ID bài viết trong `chrome.storage.local` của hồ sơ Chrome hiện tại. Khi reload hoặc chạy lại, bài có trong lịch sử được bỏ qua trước thao tác cuộn/like/bình luận. Cấu hình hiển thị số bài đã lưu và nút **Xóa dữ liệu bài đã xử lý**; nút này cũng làm mới bộ nhớ đệm của tab đang chạy, không xóa các cấu hình hoặc nhật ký khác. Bài không có ID/link ổn định không được lưu theo vị trí để tránh bỏ qua nhầm bài mới.
 - **Nhiều mẫu bình luận:** Bấm **Thêm nội dung** để tạo danh sách; mỗi ô là một mẫu riêng. Extension chọn ngẫu nhiên một mẫu cho mỗi bài và giữ nguyên mẫu đó khi retry. Ô trống được bỏ qua; cấu hình một bình luận cũ vẫn được giữ lại.
 - **Chèn emoji:** Chọn ô bình luận rồi mở **Chèn emoji vào ô đang chọn**. Emoji được chèn tại con trỏ hoặc thay đoạn đang chọn; cũng có thể nhập/dán emoji trực tiếp từ bàn phím.
@@ -40,6 +43,8 @@
 - **Chạy nền liên tục (Background Persistence):** Sử dụng Service Worker relay ping để vượt qua cơ chế đóng băng hẹn giờ (timer throttling) của Chrome khi bạn chuyển tab hoặc thu nhỏ trình duyệt.
 - **Chế độ tiết kiệm tài nguyên (Resource Optimization):** Tự động chặn tải hình ảnh/media nặng (`declarativeNetRequest`) chỉ riêng trên tab tự động hóa để tăng tốc độ phản hồi và tiết kiệm RAM/CPU.
 - **Cấu hình Khung giờ cao điểm (Peak Hours):** Hỗ trợ đặt lịch reload riêng cho các khung giờ quan trọng trong ngày (ví dụ: `10h, 12h, 15h, 17h, 20h`) duy trì trong $X$ phút với tần suất reload nhanh hơn (ví dụ: 15s).
+- **Nhập và gửi comment:** Bỏ bước xóa khi textbox trống, chờ focus/nội dung theo trạng thái với chu kỳ kiểm tra 50ms và giữ 50ms để editor cập nhật trước khi gửi. Cả inline và popup đều kích hoạt gửi comment trước, rồi bắt đầu Like trong lúc chờ xác nhận comment. Nhập thất bại thì chưa chạy Like. Mỗi lần gửi chỉ kích hoạt một lần; timeout tiếp tục theo dõi lần gửi cũ. Kết quả từng tác vụ được giữ trong trang hiện tại để retry Like không gửi lại comment đã thành công. Textbox biến mất không được coi là gửi thành công; ô nhập trống là tín hiệu giao diện, không phải xác nhận lưu comment từ máy chủ. Bài đã Like được bỏ qua trước khi kiểm tra bộ đếm bình luận hoặc gửi comment. Chỉ lưu hoàn tất khi cả Like và comment thành công.
+- **Backup sau cao điểm:** Sau mỗi khung cao điểm, tiếp tục quét với thời lượng và chu kỳ riêng (mặc định 2 phút, reload 3 giây). Đặt thời lượng backup bằng 0 để tắt. Ví dụ cao điểm 10:00–10:01 reload 1 giây, backup 10:01–10:03 reload 3 giây, sau đó về lịch thường. Thứ tự ưu tiên: ít bài > cao điểm chính > backup > thường. Đếm ngược không vượt qua mốc chuyển khung tiếp theo; thời gian tải trang và xử lý bài tính riêng. Cấu hình được áp dụng khi bắt đầu hoặc tải lại trang.
 - **Reload chuẩn xác URL ban đầu:** Khi đến chu kỳ làm mới trang, extension luôn tải lại đúng URL Fanpage được lưu lúc bắt đầu (tránh bị lạc sang URL bài viết con).
 
 ---
@@ -93,6 +98,7 @@ Click vào biểu tượng extension trên thanh công cụ để mở bảng đ
 - **Thời gian chờ Reload bình thường (giây):** Thời gian nghỉ giữa các chu kỳ quét (ví dụ: `60` giây).
   - Cho phép `0` và số thập phân như `0.5`, không còn mức tối thiểu 5 giây.
 - **Tối ưu tải trang:** Chọn **Chặn tải hình ảnh** và/hoặc **Chặn tải video**. Chỉ tab tự động hóa bị tác động; ảnh giao diện/emoji vẫn được tải.
+- **Khung giờ ít bài:** Chọn giờ bắt đầu/kết thúc và số giây reload trong khoảng đó; cấu hình mặc định `00:00–07:00`, `300` giây. Hai mốc giờ phải khác nhau. Lịch được đọc khi Bắt đầu hoặc tải lại trang.
 - **Cấu hình Khung giờ cao điểm (Tùy chọn):**
   - Tích chọn *Kích hoạt cấu hình khung giờ cao điểm*.
   - Nhập các mốc giờ cách nhau bằng dấu phẩy (ví dụ: `10, 12, 15, 17, 20`).
@@ -164,7 +170,9 @@ Extension lưu trữ trạng thái người dùng trong `chrome.storage.local`:
 
 Các cấu hình mới: `commentTemplates` (mảng chuỗi), `blockImages` và `blockVideos` (boolean). `commentText` được giữ để tương thích cấu hình cũ. Danh sách mẫu và lịch reload được đọc khi bắt đầu hoặc tải lại trang; tùy chọn chặn tải được cập nhật ngay trong lúc chạy.
 
-`processedPostHistory` lưu `{ generation, keys }`: danh sách ID của bài đã hoàn tất hoặc đã được bỏ qua theo quy tắc "đã like" hiện tại. Link có tracking/comment ID khác nhau được nhận diện là cùng bài. Xóa lịch sử chỉ xóa dữ liệu ghi nhớ trong extension; trạng thái like và bình luận trên Facebook vẫn giữ nguyên. Lịch sử được giữ khi cập nhật extension.
+`quietHoursConfig` lưu `{ enabled, startTime, endTime, reloadDelaySec }` cho lịch ít bài. Ví dụ: `{ "enabled": true, "startTime": "00:00", "endTime": "07:00", "reloadDelaySec": 300 }`.
+
+`processedPostHistory` lưu `{ generation, keys }` và tiến độ cao điểm nếu có: danh sách ID của bài đã hoàn tất. Bản hiện tại chỉ ghi hoàn tất khi cả Like và comment thành công; các ID đã lưu từ phiên bản cũ vẫn được giữ. Link có tracking/comment ID khác nhau được nhận diện là cùng bài. Xóa lịch sử chỉ xóa dữ liệu ghi nhớ trong extension; trạng thái like và bình luận trên Facebook vẫn giữ nguyên. Lịch sử được giữ khi cập nhật extension.
 
 | Khóa (Key) | Kiểu dữ liệu | Mô tả |
 | :--- | :--- | :--- |

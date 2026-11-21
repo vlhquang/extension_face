@@ -83,12 +83,31 @@ function syncResourceBlocking() {
 
 // ─── Storage Helpers ──────────────────────────────────────────────────────────
 
+// Hai kênh log: 'logs' (chu kỳ reload, quét bài) và 'timingLogs' (thời gian xử lý mỗi chu kỳ).
+const LOG_KEYS = ['logs', 'timingLogs'];
+const logKeyOf = key => LOG_KEYS.includes(key) ? key : 'logs';
+
+let logWriteQueue = Promise.resolve();
+function queueLogWrite(entry, key = 'logs') {
+  const result = logWriteQueue.then(async () => {
+    if (entry === null) {
+      await chrome.storage.local.set({ [key]: [] });
+      return;
+    }
+    const stored = await chrome.storage.local.get([key]);
+    const logs = Array.isArray(stored[key]) ? stored[key] : [];
+    await chrome.storage.local.set({ [key]: [...logs, entry].slice(-300) });
+  });
+  logWriteQueue = result.catch(err => console.warn('[FB Auto] Không lưu được log:', err));
+  return result;
+}
+
 function getStoredState() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
       [
-        'automationTabId', 'isRunning', 'commentText', 'commentTemplates', 'reloadDelaySec',
-        'originalUrl', 'targetIndices', 'peakConfig', 'backgroundGuardTab', 'blockImages', 'blockVideos'
+        'automationTabId', 'isRunning', 'commentText', 'commentTemplates', 'requireExistingComment', 'requirePositiveComments', 'commentCountDelaySec', 'reloadDelaySec',
+        'originalUrl', 'targetIndices', 'peakConfig', 'quietHoursConfig', 'backgroundGuardTab', 'blockImages', 'blockVideos'
       ],
       (res) => resolve(res || {})
     );
@@ -106,6 +125,12 @@ function withProcessedPostHistory(action) {
       keys: Array.isArray(value?.keys)
         ? [...new Set(value.keys.filter(key => /^(post|photo|video):[A-Za-z0-9]+$/.test(key)))] : [],
     };
+    if (Array.isArray(value?.commentedKeys)) {
+      history.commentedKeys = [...new Set(value.commentedKeys.filter(key => /^(post|photo|video):[A-Za-z0-9]+$/.test(key)))];
+    }
+    if (value?.peakProgress?.slotId && Array.isArray(value.peakProgress.keys)) {
+      history.peakProgress = { slotId: value.peakProgress.slotId, keys: [...new Set(value.peakProgress.keys)] };
+    }
     return action(history);
   });
   processedPostHistoryQueue = result.catch(() => {});
@@ -116,7 +141,7 @@ function readProcessedPostHistory() {
   return withProcessedPostHistory(history => history);
 }
 
-function markPostProcessed(key, generation, tabId) {
+function markPostProcessed(key, generation, tabId, completedSlot, commentOnly = false) {
   return withProcessedPostHistory(async history => {
     const state = await getStoredState();
     if (!state.isRunning || tabId !== state.automationTabId || generation !== history.generation) {
@@ -125,11 +150,26 @@ function markPostProcessed(key, generation, tabId) {
     if (typeof key !== 'string' || !/^(post|photo|video):[A-Za-z0-9]+$/.test(key)) {
       throw new Error('Không có ID bài viết hợp lệ để lưu.');
     }
+    if (commentOnly) {
+      if (!history.keys.includes(key) && !history.commentedKeys?.includes(key)) {
+        (history.commentedKeys ??= []).push(key);
+        await chrome.storage.local.set({ processedPostHistory: history });
+      }
+      return { saved: true, generation: history.generation };
+    }
     if (!history.keys.includes(key)) {
       history.keys.push(key);
+      if (history.commentedKeys) {
+        history.commentedKeys = history.commentedKeys.filter(id => id !== key);
+        if (!history.commentedKeys.length) delete history.commentedKeys;
+      }
+      if (typeof completedSlot === 'string' && completedSlot.length < 2048) {
+        if (history.peakProgress?.slotId !== completedSlot) history.peakProgress = { slotId: completedSlot, keys: [] };
+        history.peakProgress.keys.push(key);
+      }
       await chrome.storage.local.set({ processedPostHistory: history });
     }
-    return { saved: true, generation: history.generation };
+    return { saved: true, generation: history.generation, peakProgress: history.peakProgress };
   });
 }
 
@@ -258,12 +298,13 @@ async function sendToTab(tabId, payload) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
-  if (message.type === 'GET_PROCESSED_POSTS' || message.type === 'CLEAR_PROCESSED_POSTS' || message.type === 'MARK_POST_PROCESSED') {
+  if (['GET_PROCESSED_POSTS', 'CLEAR_PROCESSED_POSTS', 'MARK_POST_PROCESSED', 'MARK_POST_COMMENTED'].includes(message.type)) {
     const operation = message.type === 'GET_PROCESSED_POSTS'
       ? readProcessedPostHistory().then(history => ({ history }))
       : message.type === 'CLEAR_PROCESSED_POSTS'
         ? clearProcessedPostHistory().then(history => ({ history }))
-        : markPostProcessed(message.key, message.generation, sender.tab?.id);
+        : markPostProcessed(message.key, message.generation, sender.tab?.id, message.completedSlot,
+          message.type === 'MARK_POST_COMMENTED');
     operation.then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ error: err.message }));
     return true;
@@ -280,10 +321,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         shouldRun,
         commentText:    state.commentText || '',
         commentTemplates: state.commentTemplates,
+        requireExistingComment: state.requireExistingComment === true,
+        requirePositiveComments: state.requirePositiveComments === true,
+        commentCountDelaySec: state.commentCountDelaySec ?? 0,
         reloadDelaySec: state.reloadDelaySec ?? 30,
         originalUrl:    state.originalUrl || '',
         targetIndices:  state.targetIndices || [0, 1],
         peakConfig:     state.peakConfig || null,
+        quietHoursConfig: state.quietHoursConfig || { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 300 },
       });
     });
     return true;
@@ -375,11 +420,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // 5. Lưu log từ content script vào storage
   if (message.type === 'LOG_FROM_CONTENT') {
-    chrome.storage.local.get(['logs'], (result) => {
-      const logs = result.logs || [];
-      logs.push({ timestamp: Date.now(), text: message.text });
-      chrome.storage.local.set({ logs: logs.slice(-300) });
-    });
+    queueLogWrite({ timestamp: Date.now(), text: message.text }, logKeyOf(message.key))
+      .then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+    return true;
+  }
+  if (message.type === 'CLEAR_LOGS') {
+    queueLogWrite(null, logKeyOf(message.key))
+      .then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+    return true;
   }
 });
 
@@ -403,8 +451,10 @@ chrome.runtime.onInstalled.addListener(async () => {
     reloadDelaySec: 30,
     blockImages: true,
     blockVideos: true,
+    quietHoursConfig: { enabled: true, startTime: '00:00', endTime: '07:00', reloadDelaySec: 300 },
     originalUrl: '',
     logs: [],
+    timingLogs: [],
   };
   const stored = await chrome.storage.local.get(Object.keys(defaults));
   const missing = Object.fromEntries(Object.entries(defaults).filter(([key]) => stored[key] === undefined));

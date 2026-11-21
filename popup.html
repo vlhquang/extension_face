@@ -34,14 +34,36 @@
       </details>
     </div>
 
+    <div class="field-group">
+      <label class="checkbox-row" for="require-existing-comment">
+        <input type="checkbox" id="require-existing-comment" />
+        Bỏ qua comment + Like khi bộ đếm hiện 0 bình luận
+      </label>
+      <label class="checkbox-row" for="require-positive-comments">
+        <input type="checkbox" id="require-positive-comments" />
+        Bắt buộc số bình luận > 0 mới comment + Like
+      </label>
+      <span class="settings-hint">Ưu tiên cao nhất: nếu số là 0 hoặc không đọc được, bỏ qua lượt này và reload theo lịch, không áp dụng thời gian chờ bên dưới.</span>
+      <div class="sub-row">
+        <label for="comment-count-delay">Chờ nếu có 0 bình luận hoặc không đọc được số:</label>
+        <div class="input-with-unit">
+          <input type="number" id="comment-count-delay" min="0" step="any" value="0" />
+          <span class="unit">giây</span>
+        </div>
+      </div>
+      <span class="settings-hint">Đặt 0 để giữ cách xử lý cũ. Nếu lớn hơn 0, bài có 0 bình luận sẽ chờ rồi tương tác thay vì bỏ qua.</span>
+    </div>
+
     <!-- Reload Delay -->
     <div class="field-group field-inline">
       <label for="reload-delay">⏱ Reload sau (giây)</label>
       <div class="input-with-unit">
-        <input type="number" id="reload-delay" min="0" step="any" value="30" />
+        <input type="number" id="reload-delay" min="0" step="any" value="30" title="Cho phép dưới 1 giây, ví dụ 0.5 hoặc 0.1" />
         <span class="unit">giây</span>
       </div>
     </div>
+
+    <div class="hint">Mọi ô reload đều nhận số thập phân: 0.5 giây = 500ms, 0.1 giây = 100ms. Nhập bằng dấu chấm. Giá trị 0 bỏ thời gian chờ.</div>
 
     <!-- Chọn bài viết cần quét -->
     <div class="field-group">
@@ -84,10 +106,53 @@
         <div class="sub-row">
           <span>Reload trong khung giờ:</span>
           <div class="input-with-unit">
-            <input type="number" id="peak-reload-delay" min="0" step="any" value="15" />
+            <input type="number" id="peak-reload-delay" min="0" step="any" value="15" title="Cho phép dưới 1 giây, ví dụ 0.5 hoặc 0.1" />
             <span class="unit">giây</span>
           </div>
         </div>
+      <div class="sub-row">
+        <span>Backup sau cao điểm:</span>
+        <div class="input-with-unit">
+          <input type="number" id="peak-backup-duration" min="0" max="180" value="2" />
+          <span class="unit">phút</span>
+        </div>
+      </div>
+      <div class="sub-row">
+        <span>Reload trong backup:</span>
+        <div class="input-with-unit">
+          <input type="number" id="peak-backup-reload-delay" min="0" step="any" value="3" title="Cho phép dưới 1 giây, ví dụ 0.5 hoặc 0.1" />
+          <span class="unit">giây</span>
+        </div>
+      </div>
+      <div class="sub-row">
+        <span>Số bài thành công để chuyển backup:</span>
+        <input type="number" id="peak-success-target" min="1" step="1" value="1" />
+      </div>
+      <div class="hint">Đủ số bài mới like và comment thành công sẽ chuyển sớm sang chu kỳ backup đến hết khung. Không đếm bài cũ đã lưu. Thời lượng backup là phần kéo dài sau cao điểm; 0 phút tắt phần kéo dài.</div>
+      </div>
+    </div>
+    <div class="field-group">
+      <div class="field-inline peak-header">
+        <label for="quiet-enable">Khung giờ ít bài</label>
+        <input type="checkbox" id="quiet-enable" checked />
+      </div>
+      <div id="quiet-settings-box" class="sub-settings-box">
+        <div class="sub-row">
+          <label for="quiet-start">Từ giờ:</label>
+          <input type="time" id="quiet-start" value="00:00" required />
+        </div>
+        <div class="sub-row">
+          <label for="quiet-end">Đến giờ:</label>
+          <input type="time" id="quiet-end" value="07:00" required />
+        </div>
+        <div class="sub-row">
+          <label for="quiet-reload-delay">Reload trong khung giờ:</label>
+          <div class="input-with-unit">
+            <input type="number" id="quiet-reload-delay" min="0" step="any" value="300" title="Cho phép dưới 1 giây, ví dụ 0.5 hoặc 0.1" />
+            <span class="unit">giây</span>
+          </div>
+        </div>
+        <span class="settings-hint">Theo giờ trên máy. Ưu tiên hơn giờ cao điểm; có thể đặt khoảng giờ qua nửa đêm.</span>
       </div>
     </div>
 
@@ -112,13 +177,23 @@
       <span class="settings-hint" id="processed-post-feedback" role="status"></span>
     </fieldset>
 
+    <fieldset class="field-group">
+      <legend>Sao lưu cấu hình</legend>
+      <button type="button" class="btn-icon-text" id="export-settings">Xuất cấu hình JSON</button>
+      <button type="button" class="btn-icon-text" id="import-settings">Nhập cấu hình JSON</button>
+      <input type="file" id="import-settings-file" accept=".json,application/json" hidden />
+      <span class="settings-hint" id="settings-transfer-feedback" role="status"></span>
+    </fieldset>
     <!-- Start / Stop Button -->
     <button class="btn btn-start" id="toggle-btn">▶ Bắt đầu</button>
 
     <!-- Log Section -->
     <div class="log-section">
       <div class="log-header">
-        <span>📋 Nhật ký hoạt động</span>
+        <div class="log-tabs" role="tablist">
+          <button class="log-tab active" data-log-key="logs" role="tab" aria-selected="true">📋 Chu kỳ &amp; quét bài</button>
+          <button class="log-tab" data-log-key="timingLogs" role="tab" aria-selected="false">⏱ Thời gian</button>
+        </div>
         <div class="log-actions">
           <button class="btn-icon" id="expand-log-btn" title="Xem log đầy đủ">⛶</button>
           <button class="btn-icon" id="clear-log-btn" title="Xóa log">🗑</button>
@@ -137,7 +212,7 @@
   <div class="modal-overlay hidden" id="log-modal">
     <div class="modal">
       <div class="modal-header">
-        <span>📋 Nhật ký đầy đủ</span>
+        <span id="log-modal-title">📋 Nhật ký đầy đủ</span>
         <button class="btn-icon" id="close-modal-btn">✕</button>
       </div>
       <div id="log-modal-area" class="modal-log-area"></div>
@@ -148,6 +223,7 @@
     </div>
   </div>
 
+  <script src="config-transfer.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

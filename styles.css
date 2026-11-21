@@ -172,6 +172,8 @@ body {
 .resource-settings legend { padding: 0 4px; }
 .resource-settings .checkbox-row { display: flex; align-items: center; gap: 8px; min-height: 32px; text-transform: none; letter-spacing: normal; font-size: 12px; }
 .checkbox-row input { accent-color: #1877f2; }
+.sub-row input[type="time"] { width: 104px; padding: 4px 6px; border: 1.5px solid #dddfe2; border-radius: 6px; font: inherit; background: #fff; }
+.sub-row label { text-transform: none; letter-spacing: normal; font-size: 12px; }
 
 /* Inline field (label + input side-by-side) */
 .field-inline {
@@ -447,6 +449,24 @@ body {
   display: flex;
   gap: 2px;
 }
+
+.log-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.log-tab {
+  font-size: 11px;
+  font-weight: 700;
+  color: #606770;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+.log-tab:hover { background: #e4e6eb; }
+.log-tab.active { color: #1877f2; background: #e7f3ff; }
 
 /* Log container: renders div entries instead of textarea */
 #log-area {

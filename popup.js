@@ -10,7 +10,62 @@
 'use strict';
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
+const transferFeedback = document.getElementById('settings-transfer-feedback');
+const importSettingsFile = document.getElementById('import-settings-file');
+document.getElementById('export-settings').addEventListener('click', () => {
+  try {
+    const settings = {
+      commentTemplates: Array.from(commentList.querySelectorAll('textarea'), input => input.value),
+      requireExistingComment: requireExistingCommentEl.checked,
+      requirePositiveComments: requirePositiveCommentsEl.checked,
+      commentCountDelaySec: parseReloadDelay(commentCountDelayEl.value, 0),
+      reloadDelaySec: parseReloadDelay(reloadDelayEl.value, 30),
+      targetMode: modeCustomRadio.checked ? 'custom' : 'limit',
+      postLimit: Math.max(1, parseInt(postLimitEl.value, 10) || 2), customPosts: customPostsEl.value,
+      peakConfig: getPeakConfig(), quietHoursConfig: getQuietHoursConfig(),
+      blockImages: blockImagesEl.checked, blockVideos: blockVideosEl.checked,
+    };
+    const data = { format: 'fb-fanpage-auto-settings', version: 1,
+      extensionVersion: chrome.runtime.getManifest().version, exportedAt: new Date().toISOString(), settings };
+    validateConfigFile(data);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = 'fb-fanpage-auto-settings.json';
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    transferFeedback.textContent = 'Đã yêu cầu xuất cấu hình. File có chứa nội dung bình luận.';
+  } catch (err) { transferFeedback.textContent = 'Không xuất được: ' + err.message; }
+});
+document.getElementById('import-settings').addEventListener('click', () => {
+  importSettingsFile.value = ''; importSettingsFile.click();
+});
+importSettingsFile.addEventListener('change', async () => {
+  try {
+    const file = importSettingsFile.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024) throw Error('File vượt quá 1MB.');
+    const settings = validateConfigFile(JSON.parse(await file.text()));
+    const state = await chrome.storage.local.get(['isRunning']);
+    if (state.isRunning) throw Error('Hãy Dừng tự động hóa trước khi nhập cấu hình.');
+    await chrome.storage.local.set(settings);
+    window.location.reload();
+  } catch (err) { transferFeedback.textContent = 'Không nhập được: ' + err.message; }
+});
 const commentList      = document.getElementById('comment-list');
+const requireExistingCommentEl = document.getElementById('require-existing-comment');
+const requirePositiveCommentsEl = document.getElementById('require-positive-comments');
+requirePositiveCommentsEl.addEventListener('change', () => {
+  chrome.storage.local.set({ requirePositiveComments: requirePositiveCommentsEl.checked });
+});
+const commentCountDelayEl = document.getElementById('comment-count-delay');
+commentCountDelayEl.addEventListener('change', () => {
+  const commentCountDelaySec = parseReloadDelay(commentCountDelayEl.value, 0);
+  commentCountDelayEl.value = commentCountDelaySec;
+  chrome.storage.local.set({ commentCountDelaySec });
+});
+requireExistingCommentEl.addEventListener('change', () => {
+  chrome.storage.local.set({ requireExistingComment: requireExistingCommentEl.checked });
+});
 const addCommentBtn    = document.getElementById('add-comment-btn');
 const emojiGrid        = document.getElementById('emoji-grid');
 const blockImagesEl    = document.getElementById('block-images');
@@ -27,7 +82,15 @@ const peakEnableEl     = document.getElementById('peak-enable');
 const peakHoursEl      = document.getElementById('peak-hours');
 const peakDurationEl   = document.getElementById('peak-duration');
 const peakReloadDelayEl= document.getElementById('peak-reload-delay');
+const peakBackupDurationEl = document.getElementById('peak-backup-duration');
+const peakBackupReloadEl = document.getElementById('peak-backup-reload-delay');
+const peakSuccessTargetEl = document.getElementById('peak-success-target');
 const peakSettingsBox  = document.getElementById('peak-settings-box');
+const quietEnableEl = document.getElementById('quiet-enable');
+const quietStartEl = document.getElementById('quiet-start');
+const quietEndEl = document.getElementById('quiet-end');
+const quietReloadDelayEl = document.getElementById('quiet-reload-delay');
+const quietSettingsBox = document.getElementById('quiet-settings-box');
 const toggleBtn        = document.getElementById('toggle-btn');
 const statusDot        = document.getElementById('status-dot');
 const statusText       = document.getElementById('status-text');
@@ -39,12 +102,17 @@ const logModalArea     = document.getElementById('log-modal-area');
 const closeModalBtn    = document.getElementById('close-modal-btn');
 const modalClearBtn    = document.getElementById('modal-clear-btn');
 const modalCopyBtn     = document.getElementById('modal-copy-btn');
+const logModalTitle    = document.getElementById('log-modal-title');
+const logTabs          = document.querySelectorAll('.log-tab');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let isRunning       = false;
 let logPollTimer    = null;
-let lastLogCount    = 0;
-let allLogs         = [];
+// Hai kênh log: chu kỳ reload/quét bài và thời gian xử lý mỗi chu kỳ.
+const LOG_KEYS   = ['logs', 'timingLogs'];
+const LOG_TITLES = { logs: '📋 Chu kỳ & quét bài', timingLogs: '⏱ Thời gian xử lý' };
+const logState   = Object.fromEntries(LOG_KEYS.map(key => [key, { entries: [], lastStored: [] }]));
+let activeLogKey = 'logs';
 let automationTabId = null;   // tabId đang chạy automation
 let activeCommentInput = null;
 let nextCommentId = 0;
@@ -257,14 +325,27 @@ function setRunningUI(running, tabInfo) {
 /**
  * Thêm 1 entry log vào UI (cả popup lẫn modal nếu đang mở).
  */
-function pushEntryToUI(entry) {
-  allLogs.push(entry);
+function pushEntryToUI(entry, key = 'logs') {
+  logState[key].entries.push(entry);
+  if (key !== activeLogKey) return;
   appendEntry(logArea, entry);
   // Nếu modal đang mở → cũng append vào đó
   if (!logModal.classList.contains('hidden')) {
     appendEntry(logModalArea, entry);
   }
 }
+
+function switchLogTab(key) {
+  activeLogKey = key;
+  logTabs.forEach((tab) => {
+    const active = tab.dataset.logKey === key;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  renderAllLogs(logArea, logState[key].entries);
+}
+
+logTabs.forEach((tab) => tab.addEventListener('click', () => switchLogTab(tab.dataset.logKey)));
 
 // ─── Messaging ────────────────────────────────────────────────────────────────
 
@@ -283,12 +364,17 @@ function sendToContent(payload) {
 // ─── Log polling ──────────────────────────────────────────────────────────────
 
 function pollLogs() {
-  chrome.storage.local.get(['logs'], (result) => {
-    const logs = result.logs || [];
-    if (logs.length > lastLogCount) {
-      const newEntries = logs.slice(lastLogCount);
-      newEntries.forEach((entry) => pushEntryToUI(entry));
-      lastLogCount = logs.length;
+  chrome.storage.local.get(LOG_KEYS, (result) => {
+    for (const key of LOG_KEYS) {
+      const logs = result[key] || [];
+      const previous = logState[key].lastStored;
+      let overlap = Math.min(previous.length, logs.length);
+      while (overlap > 0 && !logs.slice(0, overlap).every((entry, i) => {
+        const old = previous[previous.length - overlap + i];
+        return entry.timestamp === old.timestamp && entry.text === old.text;
+      })) overlap--;
+      logs.slice(overlap).forEach((entry) => pushEntryToUI(entry, key));
+      logState[key].lastStored = logs;
     }
   });
 }
@@ -353,6 +439,9 @@ function getPeakConfig() {
     hours: peakHoursEl.value.trim() || '10, 12, 15, 17, 20',
     durationMin: Math.max(1, parseInt(peakDurationEl.value, 10) || 15),
     reloadDelaySec: parseReloadDelay(peakReloadDelayEl.value, 15),
+    backupDurationMin: Math.max(0, parseInt(peakBackupDurationEl.value, 10) || 0),
+    backupReloadDelaySec: parseReloadDelay(peakBackupReloadEl.value, 3),
+    successPostTarget: Math.max(1, parseInt(peakSuccessTargetEl.value, 10) || 1),
   };
 }
 
@@ -360,14 +449,43 @@ function savePeakConfig() {
   chrome.storage.local.set({ peakConfig: getPeakConfig() });
 }
 
+function updateQuietUI(enabled) {
+  quietEnableEl.checked = enabled;
+  quietSettingsBox.classList.toggle('disabled', !enabled);
+  for (const input of [quietStartEl, quietEndEl, quietReloadDelayEl]) input.disabled = !enabled;
+}
+
+function getQuietHoursConfig() {
+  return {
+    enabled: quietEnableEl.checked,
+    startTime: quietStartEl.value || '00:00',
+    endTime: quietEndEl.value || '07:00',
+    reloadDelaySec: parseReloadDelay(quietReloadDelayEl.value, 300),
+  };
+}
+
+function validateQuietHours() {
+  const config = getQuietHoursConfig();
+  quietEndEl.setCustomValidity(config.enabled && config.startTime === config.endTime
+    ? 'Giờ kết thúc phải khác giờ bắt đầu.' : '');
+  return !config.enabled || (quietStartEl.checkValidity() && quietEndEl.checkValidity());
+}
+
+function saveQuietHoursConfig() {
+  if (validateQuietHours()) chrome.storage.local.set({ quietHoursConfig: getQuietHoursConfig() });
+}
+
 // ─── Initialization ───────────────────────────────────────────────────────────
 
 function init() {
   chrome.storage.local.get([
-    'commentText', 'commentTemplates', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
-    'peakConfig', 'isRunning', 'automationTabId', 'logs', 'blockImages', 'blockVideos', 'processedPostHistory'
+    'commentText', 'commentTemplates', 'requireExistingComment', 'requirePositiveComments', 'commentCountDelaySec', 'reloadDelaySec', 'targetMode', 'postLimit', 'customPosts',
+    'peakConfig', 'quietHoursConfig', 'isRunning', 'automationTabId', ...LOG_KEYS, 'blockImages', 'blockVideos', 'processedPostHistory'
   ], async (result) => {
     // Restore settings
+    requireExistingCommentEl.checked = result.requireExistingComment === true;
+    requirePositiveCommentsEl.checked = result.requirePositiveComments === true;
+    commentCountDelayEl.value = parseReloadDelay(result.commentCountDelaySec, 0);
     const templates = Array.isArray(result.commentTemplates) && result.commentTemplates.length
       ? result.commentTemplates.filter(text => typeof text === 'string') : [result.commentText || ''];
     (templates.length ? templates : ['']).forEach(text => addCommentInput(text));
@@ -391,12 +509,21 @@ function init() {
     if (peakConfig.hours)              peakHoursEl.value       = peakConfig.hours;
     if (peakConfig.durationMin != null) peakDurationEl.value   = peakConfig.durationMin;
     if (peakConfig.reloadDelaySec != null) peakReloadDelayEl.value = peakConfig.reloadDelaySec;
+    peakBackupDurationEl.value = peakConfig.backupDurationMin ?? 2;
+    peakBackupReloadEl.value = peakConfig.backupReloadDelaySec ?? 3;
+    peakSuccessTargetEl.value = peakConfig.successPostTarget ?? 1;
+    const quiet = result.quietHoursConfig || {};
+    updateQuietUI(quiet.enabled !== false);
+    quietStartEl.value = quiet.startTime || '00:00';
+    quietEndEl.value = quiet.endTime || '07:00';
+    quietReloadDelayEl.value = quiet.reloadDelaySec ?? 300;
 
     // Restore all logs
-    const logs = result.logs || [];
-    lastLogCount = logs.length;
-    allLogs      = [...logs];
-    renderAllLogs(logArea, logs);
+    for (const key of LOG_KEYS) {
+      const logs = result[key] || [];
+      logState[key] = { entries: [...logs], lastStored: logs };
+    }
+    renderAllLogs(logArea, logState[activeLogKey].entries);
 
     // Kiểm tra tab automation còn tồn tại không
     let tabInfo = null;
@@ -469,9 +596,15 @@ peakEnableEl.addEventListener('change', () => {
   savePeakConfig();
 });
 
-[peakHoursEl, peakDurationEl, peakReloadDelayEl].forEach(el => {
+[peakHoursEl, peakDurationEl, peakReloadDelayEl, peakBackupDurationEl, peakBackupReloadEl, peakSuccessTargetEl].forEach(el => {
   el.addEventListener('change', savePeakConfig);
 });
+
+quietEnableEl.addEventListener('change', () => {
+  updateQuietUI(quietEnableEl.checked);
+  saveQuietHoursConfig();
+});
+[quietStartEl, quietEndEl, quietReloadDelayEl].forEach(input => input.addEventListener('change', saveQuietHoursConfig));
 
 // Start / Stop toggle
 toggleBtn.addEventListener('click', async () => {
@@ -485,8 +618,15 @@ toggleBtn.addEventListener('click', async () => {
   const customPosts     = customPostsEl.value.trim();
   const targetIndices   = getTargetIndices();
   const peakConfig      = getPeakConfig();
+  const quietHoursConfig = getQuietHoursConfig();
 
   if (!isRunning) {
+    if (!validateQuietHours()) {
+      if (!quietStartEl.reportValidity()) quietStartEl.focus();
+      else quietEndEl.reportValidity();
+      toggleBtn.disabled = false;
+      return;
+    }
     if (!commentTextVal) {
       alert('Vui lòng nhập nội dung bình luận trước khi bắt đầu.');
       toggleBtn.disabled = false;
@@ -496,6 +636,9 @@ toggleBtn.addEventListener('click', async () => {
     await chrome.storage.local.set({
       commentText: commentTextVal,
       commentTemplates,
+      requireExistingComment: requireExistingCommentEl.checked,
+      requirePositiveComments: requirePositiveCommentsEl.checked,
+      commentCountDelaySec: parseReloadDelay(commentCountDelayEl.value, 0),
       blockImages: blockImagesEl.checked,
       blockVideos: blockVideosEl.checked,
       reloadDelaySec,
@@ -504,6 +647,7 @@ toggleBtn.addEventListener('click', async () => {
       customPosts,
       targetIndices,
       peakConfig,
+      quietHoursConfig,
       isRunning: true
     });
 
@@ -511,9 +655,13 @@ toggleBtn.addEventListener('click', async () => {
       type: 'START_AUTOMATION',
       commentText: commentTextVal,
       commentTemplates,
+      requireExistingComment: requireExistingCommentEl.checked,
+      requirePositiveComments: requirePositiveCommentsEl.checked,
+      commentCountDelaySec: parseReloadDelay(commentCountDelayEl.value, 0),
       reloadDelaySec,
       targetIndices,
       peakConfig,
+      quietHoursConfig,
     });
     if (resp && resp.error) {
       pushEntryToUI({ timestamp: Date.now(), text: `⚠ Lỗi: ${resp.error}` });
@@ -531,8 +679,8 @@ toggleBtn.addEventListener('click', async () => {
       setRunningUI(true, tabInfo);
     });
 
+    // Dòng "▶ Bắt đầu" do content script ghi (có lưu); popup không ghi trùng.
     startLogPolling();
-    pushEntryToUI({ timestamp: Date.now(), text: '▶ Đã bắt đầu tự động hóa.' });
   } else {
     await chrome.storage.local.set({ isRunning: false });
     const resp = await sendToContent({ type: 'STOP_AUTOMATION' });
@@ -541,19 +689,22 @@ toggleBtn.addEventListener('click', async () => {
     }
     setRunningUI(false);
     stopLogPolling();
-    pushEntryToUI({ timestamp: Date.now(), text: '⏹ Đã dừng tự động hóa.' });
+    // Dòng "⏹ Đã dừng" do content script ghi; đọc thêm một lần để hiển thị nó.
+    setTimeout(pollLogs, 500);
   }
 
   toggleBtn.disabled = false;
 });
 
-// Clear log
+// Clear log (chỉ xóa kênh đang xem)
 function clearAllLogs() {
-  allLogs = [];
-  lastLogCount = 0;
+  const key = activeLogKey;
+  logState[key] = { entries: [], lastStored: [] };
   logArea.innerHTML      = '';
   logModalArea.innerHTML = '';
-  chrome.storage.local.set({ logs: [] });
+  chrome.runtime.sendMessage({ type: 'CLEAR_LOGS', key }, () => {
+    if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError.message);
+  });
 }
 
 clearLogBtn.addEventListener('click', clearAllLogs);
@@ -561,7 +712,8 @@ modalClearBtn.addEventListener('click', clearAllLogs);
 
 // Expand log modal
 expandLogBtn.addEventListener('click', () => {
-  renderAllLogs(logModalArea, allLogs);
+  logModalTitle.textContent = LOG_TITLES[activeLogKey];
+  renderAllLogs(logModalArea, logState[activeLogKey].entries);
   logModal.classList.remove('hidden');
 });
 
@@ -576,7 +728,7 @@ logModal.addEventListener('click', (e) => {
 
 // Copy log in modal
 modalCopyBtn.addEventListener('click', () => {
-  const text = allLogs.map((e) => {
+  const text = logState[activeLogKey].entries.map((e) => {
     const ts = new Date(e.timestamp).toLocaleTimeString('vi-VN', { hour12: false });
     return `[${ts}] ${e.text}`;
   }).join('\n');
